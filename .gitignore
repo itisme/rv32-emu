@@ -1,0 +1,12 @@
+*.o
+*.so
+*.swp
+*.md
+!README.md
+!README_zh.md
+*.csv
+*.py
+*.txt
+test_ttcop
+test_wait_behavior
+.vscode/
