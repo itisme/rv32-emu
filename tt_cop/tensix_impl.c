@@ -97,6 +97,16 @@ void tensix_init(tensix_t *tt,
     tt->pack_l1_write_offset = 0;
     tt->pack_l1_dest_addr_raw = 0;
 
+    /* Initialize SFPU lane predication:
+     * UseLaneFlagsForLaneEnable = true, LaneFlags = true → all lanes enabled.
+     * This matches hardware reset state: LaneEnabled = !UseLaneFlags || LaneFlags = true.
+     */
+    tt->flag_stack_top = -1;  /* empty stack */
+    for (int i = 0; i < LREG_LANES; i++) {
+        tt->lane_flags[i] = true;
+        tt->use_lane_flags[i] = true;
+    }
+
     /* Initialize SFPU LReg constants */
     {
         float f_0_8373 = 0.8373f;
@@ -104,10 +114,13 @@ void tensix_init(tensix_t *tt,
         memcpy(&fp_0_8373, &f_0_8373, 4);
         uint32_t fp_1_0 = 0x3F800000; /* 1.0f */
 
+        uint32_t fp_neg_1_0 = 0xBF800000; /* -1.0f (SFPI compiler reserves L11 for this) */
+
         for (int i = 0; i < LREG_LANES; i++) {
             tt->lreg[8][i] = fp_0_8373;
             tt->lreg[9][i] = 0;
             tt->lreg[10][i] = fp_1_0;
+            tt->lreg[11][i] = fp_neg_1_0;
             tt->lreg[15][i] = 2 * i;
         }
     }

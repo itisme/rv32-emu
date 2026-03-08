@@ -1651,15 +1651,128 @@ static bool sfpstore(tensix_t *tt, uint32_t imm, int tid) {
     return true;
 }
 static bool sfplut(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool sfpmuli(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool sfpaddi(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpmuli(tensix_t *tt, uint32_t imm, int tid) {
+    /* Encoding: imm16<<8 | VD<<4 | Mod1
+     * VD = ±VD * BF16ToFP32(Imm16) + 0  (VC = VD) */
+    (void)tid;
+    uint32_t imm16 = (imm >> 8) & 0xFFFF;
+    uint32_t vd    = (imm >> 4) & 0xF;
+    uint32_t mod1  = imm & 0xF;
+
+    float bf16_val;
+    uint32_t bf16_bits = imm16 << 16;
+    memcpy(&bf16_val, &bf16_bits, 4);
+
+    for (int lane = 0; lane < LREG_LANES; lane++) {
+        if (tt->use_lane_flags[lane] && !tt->lane_flags[lane]) continue;
+        float c;
+        memcpy(&c, &tt->lreg[vd][lane], 4);
+        if (mod1 & 2) c = -c; /* SFPMAD_MOD1_NEGATE_VC */
+        float d = bf16_val * c + 0.0f;
+        unsigned dst = (mod1 & 8) && vd != 16 ? (tt->lreg[7][lane] & 15) : vd;
+        if (dst < 8 || dst == 16)
+            memcpy(&tt->lreg[dst][lane], &d, 4);
+    }
+    return true;
+}
+static bool sfpaddi(tensix_t *tt, uint32_t imm, int tid) {
+    /* Encoding: imm16<<8 | VD<<4 | Mod1
+     * VD = BF16ToFP32(Imm16) * 1.0 + VD  (VC = VD) */
+    (void)tid;
+    uint32_t imm16 = (imm >> 8) & 0xFFFF;
+    uint32_t vd    = (imm >> 4) & 0xF;
+    uint32_t mod1  = imm & 0xF;
+
+    float bf16_val;
+    uint32_t bf16_bits = imm16 << 16;
+    memcpy(&bf16_val, &bf16_bits, 4);
+
+    for (int lane = 0; lane < LREG_LANES; lane++) {
+        if (tt->use_lane_flags[lane] && !tt->lane_flags[lane]) continue;
+        float c;
+        memcpy(&c, &tt->lreg[vd][lane], 4);
+        if (mod1 & 2) c = -c; /* SFPMAD_MOD1_NEGATE_VC */
+        float d = bf16_val + c;
+        unsigned dst = (mod1 & 8) && vd != 16 ? (tt->lreg[7][lane] & 15) : vd;
+        if (dst < 8 || dst == 16)
+            memcpy(&tt->lreg[dst][lane], &d, 4);
+    }
+    return true;
+}
 static bool sfpdivp2(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool sfpexexp(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool sfpexman(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool sfpiadd(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool sfpshft(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool sfpsetcc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool sfpmov(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpsetcc(tensix_t *tt, uint32_t imm, int tid) {
+    /* Encoding: imm12<<12 | VC<<8 | VD<<4 | Mod1
+     * imm1 = bit0 of imm12 (Imm1 in ISA) */
+    (void)tid;
+    uint32_t imm12 = (imm >> 12) & 0xFFF;
+    uint32_t vc    = (imm >> 8) & 0xF;
+    uint32_t vd    = (imm >> 4) & 0xF;
+    uint32_t mod1  = imm & 0xF;
+    uint32_t imm1  = imm12 & 1;
+
+    #define SFPSETCC_MOD1_IMM_BIT0  1
+    #define SFPSETCC_MOD1_LREG_NE0  2
+    #define SFPSETCC_MOD1_LREG_GTE0 4
+    #define SFPSETCC_MOD1_LREG_EQ0  6
+    #define SFPSETCC_MOD1_CLEAR     8
+
+    for (int lane = 0; lane < LREG_LANES; lane++) {
+        if (vd >= 12) continue; /* VD >= 12 with no DISABLE_BACKDOOR_LOAD: skip */
+
+        bool lane_enabled = !tt->use_lane_flags[lane] || tt->lane_flags[lane];
+        if (!lane_enabled) continue;
+
+        if (!tt->use_lane_flags[lane]) {
+            /* First SFPSETCC: always sets LaneFlags = false, then enables predication */
+            tt->lane_flags[lane] = false;
+        } else if (mod1 & SFPSETCC_MOD1_CLEAR) {
+            tt->lane_flags[lane] = false;
+        } else if (mod1 & SFPSETCC_MOD1_IMM_BIT0) {
+            tt->lane_flags[lane] = (imm1 != 0);
+        } else {
+            int32_t c;
+            memcpy(&c, &tt->lreg[vc][lane], 4);
+            switch (mod1) {
+            case 0: /* LREG_LT0 */  tt->lane_flags[lane] = (c <  0); break;
+            case 2: /* LREG_NE0 */  tt->lane_flags[lane] = (c != 0); break;
+            case 4: /* LREG_GTE0 */ tt->lane_flags[lane] = (c >= 0); break;
+            case 6: /* LREG_EQ0 */  tt->lane_flags[lane] = (c == 0); break;
+            default: break;
+            }
+        }
+    }
+
+    return true;
+}
+static bool sfpmov(tensix_t *tt, uint32_t imm, int tid) {
+    /* Encoding: imm12<<12 | VC<<8 | VD<<4 | Mod1 */
+    (void)tid;
+    uint32_t vc   = (imm >> 8) & 0xF;
+    uint32_t vd   = (imm >> 4) & 0xF;
+    uint32_t mod1 = imm & 0xF;
+
+    #define SFPMOV_MOD1_NEGATE            1
+    #define SFPMOV_MOD1_ALL_LANES_ENABLED 2
+
+    for (int lane = 0; lane < LREG_LANES; lane++) {
+        if (vd >= 12) continue;
+        bool lane_enabled = !tt->use_lane_flags[lane] || tt->lane_flags[lane];
+        if (!lane_enabled && mod1 != SFPMOV_MOD1_ALL_LANES_ENABLED) continue;
+
+        uint32_t x = tt->lreg[vc][lane];
+        if (mod1 & SFPMOV_MOD1_NEGATE) {
+            x ^= 0x80000000;
+        }
+        if (vd < 8 || vd == 16) {
+            tt->lreg[vd][lane] = x;
+        }
+    }
+    return true;
+}
 static bool sfpabs(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool sfpand(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool sfpor(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
@@ -1667,33 +1780,109 @@ static bool sfpnot(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (
 static bool sfplz(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool sfpsetexp(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool sfpsetman(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool sfpmad(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool sfpadd(tensix_t *tt, uint32_t imm, int tid) {
-    uint32_t src_a = (imm >> 16) & 0xF;
-    uint32_t src_b = (imm >> 12) & 0xF;
-    uint32_t src_c = (imm >> 8)  & 0xF;
-    uint32_t dest  = (imm >> 4)  & 0xF;
+/* Common MAD implementation for SFPMAD, SFPADD, SFPMUL
+ * Encoding: VA<<16 | VB<<12 | VC<<8 | VD<<4 | Mod1
+ * Computes: VD = ±(VA * VB) ± VC  (per lane, with predication)
+ */
+static bool sfp_mad_common(tensix_t *tt, uint32_t imm) {
+    uint32_t va   = (imm >> 16) & 0xF;
+    uint32_t vb   = (imm >> 12) & 0xF;
+    uint32_t vc   = (imm >> 8)  & 0xF;
+    uint32_t vd   = (imm >> 4)  & 0xF;
+    uint32_t mod1 = imm & 0xF;
 
-    if (dest >= 8) return true;  /* VD >= 8 disables write */
+    #define SFPMAD_MOD1_NEGATE_VA   1
+    #define SFPMAD_MOD1_NEGATE_VC   2
+    #define SFPMAD_MOD1_INDIRECT_VA 4
+    #define SFPMAD_MOD1_INDIRECT_VD 8
 
-    /* MAD: dest = src_a * src_b + src_c */
     for (int lane = 0; lane < LREG_LANES; lane++) {
+        if (vd >= 12) continue;
+        bool lane_enabled = !tt->use_lane_flags[lane] || tt->lane_flags[lane];
+        if (!lane_enabled) continue;
+
+        unsigned src_a = (mod1 & SFPMAD_MOD1_INDIRECT_VA) ? (tt->lreg[7][lane] & 15) : va;
+        uint32_t a_bits = tt->lreg[src_a][lane];
+        uint32_t b_bits = tt->lreg[vb][lane];
+        uint32_t c_bits = tt->lreg[vc][lane];
+        if (mod1 & SFPMAD_MOD1_NEGATE_VA) a_bits ^= 0x80000000;
+        if (mod1 & SFPMAD_MOD1_NEGATE_VC) c_bits ^= 0x80000000;
+
         float a, b, c;
-        memcpy(&a, &tt->lreg[src_a][lane], 4);
-        memcpy(&b, &tt->lreg[src_b][lane], 4);
-        memcpy(&c, &tt->lreg[src_c][lane], 4);
+        memcpy(&a, &a_bits, 4);
+        memcpy(&b, &b_bits, 4);
+        memcpy(&c, &c_bits, 4);
         float result = a * b + c;
-        memcpy(&tt->lreg[dest][lane], &result, 4);
+
+        unsigned dst = (mod1 & SFPMAD_MOD1_INDIRECT_VD) && vd != 16 ? (tt->lreg[7][lane] & 15) : vd;
+        if (dst < 8 || dst == 16)
+            memcpy(&tt->lreg[dst][lane], &result, 4);
+    }
+    return true;
+}
+static bool sfpmad(tensix_t *tt, uint32_t imm, int tid) { (void)tid; return sfp_mad_common(tt, imm); }
+static bool sfpadd(tensix_t *tt, uint32_t imm, int tid) { (void)tid; return sfp_mad_common(tt, imm); }
+static bool sfpmul(tensix_t *tt, uint32_t imm, int tid) { (void)tid; return sfp_mad_common(tt, imm); }
+static bool sfppushc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfppopc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpsetsgn(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpencc(tensix_t *tt, uint32_t imm, int tid) {
+    /* Encoding: imm12<<12 | VC<<8 | VD<<4 | Mod1
+     * Imm2 = imm12 & 3 */
+    (void)tid;
+    uint32_t imm12 = (imm >> 12) & 0xFFF;
+    uint32_t vd    = (imm >> 4) & 0xF;
+    uint32_t mod1  = imm & 0xF;
+    uint32_t imm2  = imm12 & 3;
+
+    #define SFPENCC_MOD1_EC 1
+    #define SFPENCC_MOD1_EI 2
+    #define SFPENCC_MOD1_RI 8
+    #define SFPENCC_IMM2_E  1
+    #define SFPENCC_IMM2_R  2
+
+    for (int lane = 0; lane < LREG_LANES; lane++) {
+        if (vd >= 12) continue;
+
+        if (mod1 & SFPENCC_MOD1_EI) {
+            tt->use_lane_flags[lane] = (imm2 & SFPENCC_IMM2_E) != 0;
+        } else if (mod1 & SFPENCC_MOD1_EC) {
+            tt->use_lane_flags[lane] = !tt->use_lane_flags[lane];
+        }
+
+        if (mod1 & SFPENCC_MOD1_RI) {
+            tt->lane_flags[lane] = (imm2 & SFPENCC_IMM2_R) != 0;
+        } else {
+            tt->lane_flags[lane] = true;
+        }
     }
 
     return true;
 }
-static bool sfpmul(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool sfppushc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool sfppopc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool sfpsetsgn(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool sfpencc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool sfpcompc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpcompc(tensix_t *tt, uint32_t imm, int tid) {
+    /* Encoding: imm12<<12 | VC<<8 | VD<<4 | Mod1
+     * Implements 'else': LaneFlags = StackTop.LaneFlags && !LaneFlags */
+    (void)tid;
+    uint32_t vd = (imm >> 4) & 0xF;
+
+    for (int lane = 0; lane < LREG_LANES; lane++) {
+        if (vd >= 12) continue;
+
+        /* Peek at stack top */
+        bool top_use = true, top_flags = true;
+        if (tt->flag_stack_top >= 0) {
+            top_use = tt->flag_stack[tt->flag_stack_top].use_lane_flags[lane];
+            top_flags = tt->flag_stack[tt->flag_stack_top].lane_flags[lane];
+        }
+
+        if (top_use && tt->use_lane_flags[lane]) {
+            tt->lane_flags[lane] = top_flags && !tt->lane_flags[lane];
+        } else {
+            tt->lane_flags[lane] = false;
+        }
+    }
+    return true;
+}
 static bool sfptransp(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool sfpxor(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool sfp_stoch_rnd(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }

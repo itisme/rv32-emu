@@ -380,6 +380,16 @@ struct tensix {
     /* SFPU Local Registers */
     uint32_t lreg[LREG_COUNT][LREG_LANES];
 
+    /* SFPU Lane Predication (per-lane conditional execution) */
+    bool lane_flags[LREG_LANES];               /* Per-lane condition flags */
+    bool use_lane_flags[LREG_LANES];           /* Per-lane: use LaneFlags for LaneEnabled? */
+#define FLAG_STACK_DEPTH 8
+    struct {
+        bool lane_flags[LREG_LANES];
+        bool use_lane_flags[LREG_LANES];
+    } flag_stack[FLAG_STACK_DEPTH];
+    int flag_stack_top;                        /* -1 = empty */
+
     uint32_t sem_math_pack;
 
     float neginf;
