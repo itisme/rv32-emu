@@ -98,48 +98,48 @@ static bool ttatcas(tensix_t *tt, uint32_t imm, int tid);
 static bool ttstoreind(tensix_t *tt, uint32_t imm, int tid);
 static bool ttstorereg(tensix_t *tt, uint32_t imm, int tid);
 static bool ttloadreg(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpload(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfploadi(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpstore(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfplut(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpmuli(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpaddi(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpdivp2(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpexexp(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpexman(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpiadd(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpshft(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpsetcc(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpmov(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpabs(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpand(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpor(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpnot(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfplz(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpsetexp(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpsetman(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpmad(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpadd(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpmul(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfppushc(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfppopc(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpsetsgn(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpencc(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpcompc(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfptransp(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpxor(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfp_stoch_rnd(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpnop(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpcast(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpconfig(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpswap(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfploadmacro(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpshft2(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfplutfp32(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfple(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpgt(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfpmul24(tensix_t *tt, uint32_t imm, int tid);
-static bool ttsfparecip(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpload(tensix_t *tt, uint32_t imm, int tid);
+static bool sfploadi(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpstore(tensix_t *tt, uint32_t imm, int tid);
+static bool sfplut(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpmuli(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpaddi(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpdivp2(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpexexp(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpexman(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpiadd(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpshft(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpsetcc(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpmov(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpabs(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpand(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpor(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpnot(tensix_t *tt, uint32_t imm, int tid);
+static bool sfplz(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpsetexp(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpsetman(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpmad(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpadd(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpmul(tensix_t *tt, uint32_t imm, int tid);
+static bool sfppushc(tensix_t *tt, uint32_t imm, int tid);
+static bool sfppopc(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpsetsgn(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpencc(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpcompc(tensix_t *tt, uint32_t imm, int tid);
+static bool sfptransp(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpxor(tensix_t *tt, uint32_t imm, int tid);
+static bool sfp_stoch_rnd(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpnop(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpcast(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpconfig(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpswap(tensix_t *tt, uint32_t imm, int tid);
+static bool sfploadmacro(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpshft2(tensix_t *tt, uint32_t imm, int tid);
+static bool sfplutfp32(tensix_t *tt, uint32_t imm, int tid);
+static bool sfple(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpgt(tensix_t *tt, uint32_t imm, int tid);
+static bool sfpmul24(tensix_t *tt, uint32_t imm, int tid);
+static bool sfparecip(tensix_t *tt, uint32_t imm, int tid);
 static bool ttatgetm(tensix_t *tt, uint32_t imm, int tid);
 static bool ttatrelm(tensix_t *tt, uint32_t imm, int tid);
 static bool ttstallwait(tensix_t *tt, uint32_t imm, int tid);
@@ -171,9 +171,9 @@ const insn_impl tt_jump_table[256] = {
     OP(ttxmov), OP(ttpacr), OP(ttunpacr), OP(ttunpacr_nop), OP(ttrstdma), OP(ttsetdmareg), OP(ttflushdma), OP(unimp), OP(ttreg2flop), OP(ttloadind), OP(ttpacr_setreg), OP(tttbufcmd), OP(unimp), OP(unimp), OP(unimp), OP(unimp), // 0x40
     OP(ttsetadc), OP(ttsetadcxy), OP(ttincadcxy), OP(ttaddrcrxy), OP(ttsetadczw), OP(ttincadczw), OP(ttaddrcrzw), OP(ttsetdvalid), OP(ttadddmareg), OP(ttsubdmareg), OP(ttmuldmareg), OP(ttbitwopdmareg), OP(ttshiftdmareg), OP(ttcmpdmareg), OP(ttsetadcxx), OP(unimp), // 0x50
     OP(ttdmanop), OP(ttatincget), OP(ttatincgetptr), OP(ttatswap), OP(ttatcas), OP(unimp), OP(ttstoreind), OP(ttstorereg), OP(ttloadreg), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), // 0x60
-    OP(ttsfpload), OP(ttsfploadi), OP(ttsfpstore), OP(ttsfplut), OP(ttsfpmuli), OP(ttsfpaddi), OP(ttsfpdivp2), OP(ttsfpexexp), OP(ttsfpexman), OP(ttsfpiadd), OP(ttsfpshft), OP(ttsfpsetcc), OP(ttsfpmov), OP(ttsfpabs), OP(ttsfpand), OP(ttsfpor), // 0x70
-    OP(ttsfpnot), OP(ttsfplz), OP(ttsfpsetexp), OP(ttsfpsetman), OP(ttsfpmad), OP(ttsfpadd), OP(ttsfpmul), OP(ttsfppushc), OP(ttsfppopc), OP(ttsfpsetsgn), OP(ttsfpencc), OP(ttsfpcompc), OP(ttsfptransp), OP(ttsfpxor), OP(ttsfp_stoch_rnd), OP(ttsfpnop), // 0x80
-    OP(ttsfpcast), OP(ttsfpconfig), OP(ttsfpswap), OP(ttsfploadmacro), OP(ttsfpshft2), OP(ttsfplutfp32), OP(ttsfple), OP(ttsfpgt), OP(ttsfpmul24), OP(ttsfparecip), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), // 0x90
+    OP(sfpload), OP(sfploadi), OP(sfpstore), OP(sfplut), OP(sfpmuli), OP(sfpaddi), OP(sfpdivp2), OP(sfpexexp), OP(sfpexman), OP(sfpiadd), OP(sfpshft), OP(sfpsetcc), OP(sfpmov), OP(sfpabs), OP(sfpand), OP(sfpor), // 0x70
+    OP(sfpnot), OP(sfplz), OP(sfpsetexp), OP(sfpsetman), OP(sfpmad), OP(sfpadd), OP(sfpmul), OP(sfppushc), OP(sfppopc), OP(sfpsetsgn), OP(sfpencc), OP(sfpcompc), OP(sfptransp), OP(sfpxor), OP(sfp_stoch_rnd), OP(sfpnop), // 0x80
+    OP(sfpcast), OP(sfpconfig), OP(sfpswap), OP(sfploadmacro), OP(sfpshft2), OP(sfplutfp32), OP(sfple), OP(sfpgt), OP(sfpmul24), OP(sfparecip), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), // 0x90
     OP(ttatgetm), OP(ttatrelm), OP(ttstallwait), OP(ttseminit), OP(ttsempost), OP(ttsemget), OP(ttsemwait), OP(ttstreamwait), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), // 0xa0
     OP(ttwrcfg), OP(ttrdcfg), OP(ttsetc16), OP(ttrmwcib0), OP(ttrmwcib1), OP(ttrmwcib2), OP(ttrmwcib3), OP(ttstreamwrcfg), OP(ttcfgshiftmask), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), // 0xb0
     OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), // 0xc0
@@ -1580,7 +1580,7 @@ static bool ttloadreg(tensix_t *tt, uint32_t imm, int tid) {
     }
     return true;
 }
-static bool ttsfpload(tensix_t *tt, uint32_t imm, int tid) {
+static bool sfpload(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_SFPLOAD(lreg_ind, instr_mod0, sfpu_addr_mode, dest_reg_addr)
      * Encoding: lreg_ind<<20 | instr_mod0<<16 | sfpu_addr_mode<<13 | dest_reg_addr<<0
      * Bits:     [23:20](4)    [19:16](4)       [15:13](3)           [12:0](13)
@@ -1617,8 +1617,8 @@ static bool ttsfpload(tensix_t *tt, uint32_t imm, int tid) {
     apply_addr_mod(tt, sfpu_addr_mode, tid);
     return true;
 }
-static bool ttsfploadi(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpstore(tensix_t *tt, uint32_t imm, int tid) {
+static bool sfploadi(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpstore(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_SFPSTORE(dest_reg_addr, lreg_ind, instr_mod0, sfpu_addr_mode)
      * Encoding: lreg_ind<<20 | instr_mod0<<16 | sfpu_addr_mode<<13 | dest_reg_addr<<0
      * Bits:     [23:20](4)    [19:16](4)       [15:13](3)           [12:0](13)
@@ -1650,25 +1650,25 @@ static bool ttsfpstore(tensix_t *tt, uint32_t imm, int tid) {
     apply_addr_mod(tt, sfpu_addr_mode, tid);
     return true;
 }
-static bool ttsfplut(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpmuli(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpaddi(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpdivp2(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpexexp(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpexman(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpiadd(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpshft(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpsetcc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpmov(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpabs(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpand(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpor(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpnot(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfplz(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpsetexp(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpsetman(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpmad(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpadd(tensix_t *tt, uint32_t imm, int tid) {
+static bool sfplut(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpmuli(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpaddi(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpdivp2(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpexexp(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpexman(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpiadd(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpshft(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpsetcc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpmov(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpabs(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpand(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpor(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpnot(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfplz(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpsetexp(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpsetman(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpmad(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpadd(tensix_t *tt, uint32_t imm, int tid) {
     uint32_t src_a = (imm >> 16) & 0xF;
     uint32_t src_b = (imm >> 12) & 0xF;
     uint32_t src_c = (imm >> 8)  & 0xF;
@@ -1688,26 +1688,26 @@ static bool ttsfpadd(tensix_t *tt, uint32_t imm, int tid) {
 
     return true;
 }
-static bool ttsfpmul(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfppushc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfppopc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpsetsgn(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpencc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpcompc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfptransp(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpxor(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfp_stoch_rnd(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpnop(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpcast(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpconfig(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpswap(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfploadmacro(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpshft2(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfplutfp32(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfple(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpgt(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfpmul24(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsfparecip(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpmul(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfppushc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfppopc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpsetsgn(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpencc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpcompc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfptransp(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpxor(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfp_stoch_rnd(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpnop(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpcast(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpconfig(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpswap(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfploadmacro(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpshft2(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfplutfp32(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfple(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpgt(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpmul24(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfparecip(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool ttatgetm(tensix_t *tt, uint32_t imm, int tid) {
     uint32_t mutex_id = imm & 0x7;
     if (tt->mutex[mutex_id] == MUTEX_NONE) {
