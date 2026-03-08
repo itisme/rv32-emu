@@ -97,6 +97,21 @@ void tensix_init(tensix_t *tt,
     tt->pack_l1_write_offset = 0;
     tt->pack_l1_dest_addr_raw = 0;
 
+    /* Initialize SFPU LReg constants */
+    {
+        float f_0_8373 = 0.8373f;
+        uint32_t fp_0_8373;
+        memcpy(&fp_0_8373, &f_0_8373, 4);
+        uint32_t fp_1_0 = 0x3F800000; /* 1.0f */
+
+        for (int i = 0; i < LREG_LANES; i++) {
+            tt->lreg[8][i] = fp_0_8373;
+            tt->lreg[9][i] = 0;
+            tt->lreg[10][i] = fp_1_0;
+            tt->lreg[15][i] = 2 * i;
+        }
+    }
+
     /* IEEE 754 negative infinity */
     {
         uint32_t neg_inf_bits = 0xFF800000;

@@ -68,6 +68,10 @@ int rv32_has_halted(rv32_cpu_t handle) {
     return rv_has_halted(handle);
 }
 
+uint32_t rv32_get_pc(rv32_cpu_t handle) {
+    return rv_get_pc((riscv_t *)handle);
+}
+
 void rv32_destroy(rv32_cpu_t cpu) {
     riscv_t *rv = (riscv_t *)cpu;
     vm_attr_t *attr = PRIV(rv);

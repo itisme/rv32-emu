@@ -36,6 +36,10 @@
 #define OPCODE_GAPOOL     0x34
 #define OPCODE_MFCONV3S1  0x3a
 
+/* Move instructions that use SrcA/SrcB/Dest as source */
+#define OPCODE_MOVA2D     0x12
+#define OPCODE_MOVB2D     0x13
+
 /* Check if instruction requires SrcA dvalid */
 static inline bool insn_needs_srca(uint32_t opcode)
 {
@@ -54,6 +58,7 @@ static inline bool insn_needs_srca(uint32_t opcode)
     case OPCODE_GMPOOL:
     case OPCODE_GAPOOL:
     case OPCODE_MFCONV3S1:
+    case OPCODE_MOVA2D:
         return true;
     default:
         return false;
@@ -259,11 +264,8 @@ void tensix_cop_execute(tensix_cop_t *cop, int thread_id, uint32_t insn)
 {
     tensix_t *core = cop->core;
 
-    /* Set the current thread ID so instructions can access it */
-    core->thread_id = thread_id;
-
     /* Use the jump table to execute the instruction */
-    tensix_execute_insn(core, insn);
+    tensix_execute_insn(core, insn, thread_id);
 
     /* Instruction executed successfully */
     cop->threads[thread_id].insn_executed++;
@@ -584,10 +586,18 @@ static bool wait_gate_check(tensix_cop_t *cop, int core_id)
             return false;
 
         /* C9: Mover has outstanding memory requests.
-         * C10: RISCV T core has outstanding requests.
-         * C11: Vector Unit (SFPU) pipeline busy.
+         * C10: SrcA AllowedClient != MatrixUnit
+         * C11: SrcB AllowedClient != MatrixUnit  
          * C12: Configuration Unit pipeline busy (any thread).
-         * In synchronous simulator these conditions are always met (pipeline/requests completed). */
+         *
+         * In synchronous simulator these conditions are always met (pipeline/requests completed).
+         * TODO: Properly implement C10/C11 by tracking AllowedClient state.
+         * For now, C9-C12 always return true (conditions met).
+         * Note: C10/C11 would require SETDVALID to set srca_dvalid/srcb_dvalid,
+         * but this needs proper integration with Unpacker flow.
+         */
+        (void)cond;  /* Suppress unused variable warning */
+        (void)core;  /* Suppress unused variable warning */
 
         return true;
 
@@ -1539,9 +1549,6 @@ bool tensix_cop_execute_insn(tensix_cop_t *cop, int core_id, uint32_t insn)
 {
     tensix_t *core = cop->core;
 
-    /* Set the current thread ID so instructions can access it */
-    core->thread_id = core_id;
-
-    /* Use the jump table to execute the instruction */
-    return tensix_execute_insn(core, insn);
+    /* Pass core_id as tid to avoid race conditions on shared thread_id */
+    return tensix_execute_insn(core, insn, core_id);
 }

@@ -68,6 +68,18 @@ extern int tt_log_level;
 #define STALL_ON_ZERO 0x1
 #define STALL_ON_MAX  0x2
 
+/* SFPU Local Registers: 17 registers × 32 lanes, each 32-bit */
+/* LReg[0-7]: general purpose (read/write)
+ * LReg[8]:  read-only, all lanes = 0.8373 (FP32)
+ * LReg[9]:  read-only, all lanes = 0
+ * LReg[10]: read-only, all lanes = 1.0 (FP32)
+ * LReg[11-14]: writable only via SFPCONFIG
+ * LReg[15]: read-only, lane i = 2*i (0,2,4,...,62)
+ * LReg[16]: writable only via SFPLOADMACRO
+ */
+#define LREG_COUNT    17
+#define LREG_LANES    32
+
 #define DMA_REG_COUNT 64
 
 #define MUTEX_NONE 0xff
@@ -317,14 +329,14 @@ struct tensix {
     bool dest_dvalid;  /* Dest register contains valid data (set by ELWADD, cleared by PACR) */
     uint32_t pack_l1_write_offset;  /* Running L1 write byte offset for packer (auto-increments) */
     uint32_t pack_l1_dest_addr_raw; /* Last raw cfg[69] value, to detect new tile */
-    /* status control */
-    uint32_t srca_rwc;
-    uint32_t srca_rwc_cr;
-    uint32_t srcb_rwc;
-    uint32_t srcb_rwc_cr;
-    uint32_t dest_rwc;
-    uint32_t dest_rwc_cr;
-    uint32_t fidelity;
+    /* Per-thread RWC counters (ISA: RWCs[CurrentThread]) */
+    uint32_t srca_rwc[3];
+    uint32_t srca_rwc_cr[3];
+    uint32_t srcb_rwc[3];
+    uint32_t srcb_rwc_cr[3];
+    uint32_t dest_rwc[3];
+    uint32_t dest_rwc_cr[3];
+    uint32_t fidelity[3];
     uint32_t bias;
     /* address mode */
     AddrMod addr_mod[8];
@@ -349,7 +361,7 @@ struct tensix {
     uint32_t sem[8];
     uint32_t sem_max[8];
 
-    uint32_t thread_id;
+    uint32_t thread_id;          /* Deprecated: use tid parameter instead */
 
     uint32_t thd_reg[3][THD_REG_COUNT];    // 16-bit
     uint32_t cfg_reg[2][CFG_REG_COUNT];
@@ -364,6 +376,9 @@ struct tensix {
     uint32_t pack_edge_offset_mask[4]; 
     uint32_t pack_edge_row_set_select[4];
     uint32_t tile_row_set_mapping[4];
+
+    /* SFPU Local Registers */
+    uint32_t lreg[LREG_COUNT][LREG_LANES];
 
     uint32_t sem_math_pack;
 
@@ -428,7 +443,7 @@ void tensix_reset(tensix_t *tt);
 /* Execute a tensix instruction.
  * Returns true if completed, false if blocked/incomplete.
  */
-bool tensix_execute_insn(tensix_t *tt, uint32_t insn);
+bool tensix_execute_insn(tensix_t *tt, uint32_t insn, int tid);
 
 /* Write to MOP_CFG registers (0xFFB80000), called from rv32emu MMIO handler */
 void tensix_write_mop_cfg(tensix_t *tt, int core_id, uint32_t offset, uint32_t data);

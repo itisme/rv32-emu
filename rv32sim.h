@@ -32,6 +32,9 @@ void rv32_halt(rv32_cpu_t handle);
 
 int rv32_has_halted(rv32_cpu_t handle);
 
+// Get current PC
+uint32_t rv32_get_pc(rv32_cpu_t handle);
+
 // Destroy the CPU instance
 void rv32_destroy(rv32_cpu_t handle);
 

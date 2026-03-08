@@ -7,153 +7,156 @@
 
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include "tensix.h"
 #include "tensix_cop.h"
+
 
 /* Instruction implementation function pointer type.
  * Returns true if the instruction completed, false if blocked/incomplete.
  */
-typedef bool (*insn_impl)(tensix_t *tt, uint32_t imm);
+typedef bool (*insn_impl)(tensix_t *tt, uint32_t imm, int tid);
 
 /* Forward declarations for all instruction implementations */
-static bool unimp(tensix_t *tt, uint32_t imm);
-static bool ttmop(tensix_t *tt, uint32_t imm);
-static bool ttnop(tensix_t *tt, uint32_t imm);
-static bool ttmop_cfg(tensix_t *tt, uint32_t imm);
-static bool ttreplay(tensix_t *tt, uint32_t imm);
-static bool ttresourcedecl(tensix_t *tt, uint32_t imm);
-static bool ttmovd2a(tensix_t *tt, uint32_t imm);
-static bool ttmovdbga2d(tensix_t *tt, uint32_t imm);
-static bool ttmovd2b(tensix_t *tt, uint32_t imm);
-static bool ttmovb2a(tensix_t *tt, uint32_t imm);
-static bool ttmovdbgb2d(tensix_t *tt, uint32_t imm);
-static bool ttzeroacc(tensix_t *tt, uint32_t imm);
-static bool ttzerosrc(tensix_t *tt, uint32_t imm);
-static bool ttmova2d(tensix_t *tt, uint32_t imm);
-static bool ttmovb2d(tensix_t *tt, uint32_t imm);
-static bool tttrnspsrca(tensix_t *tt, uint32_t imm);
-static bool ttrareb(tensix_t *tt, uint32_t imm);
-static bool tttrnspsrcb(tensix_t *tt, uint32_t imm);
-static bool ttshiftxa(tensix_t *tt, uint32_t imm);
-static bool ttshiftxb(tensix_t *tt, uint32_t imm);
-static bool ttsetashrmh0(tensix_t *tt, uint32_t imm);
-static bool ttsetashrmh1(tensix_t *tt, uint32_t imm);
-static bool ttsetashrmv(tensix_t *tt, uint32_t imm);
-static bool ttsetpkedgof(tensix_t *tt, uint32_t imm);
-static bool ttsetashrmh(tensix_t *tt, uint32_t imm);
-static bool ttclrexphist(tensix_t *tt, uint32_t imm);
-static bool ttconv3s1(tensix_t *tt, uint32_t imm);
-static bool ttconv3s2(tensix_t *tt, uint32_t imm);
-static bool ttmpool3s1(tensix_t *tt, uint32_t imm);
-static bool ttapool3s1(tensix_t *tt, uint32_t imm);
-static bool ttmvmul(tensix_t *tt, uint32_t imm);
-static bool ttelwmul(tensix_t *tt, uint32_t imm);
-static bool ttelwadd(tensix_t *tt, uint32_t imm);
-static bool ttdotpv(tensix_t *tt, uint32_t imm);
-static bool ttelwsub(tensix_t *tt, uint32_t imm);
-static bool ttmpool3s2(tensix_t *tt, uint32_t imm);
-static bool ttapool3s2(tensix_t *tt, uint32_t imm);
-static bool ttgmpool(tensix_t *tt, uint32_t imm);
-static bool ttgapool(tensix_t *tt, uint32_t imm);
-static bool ttgatesrcrst(tensix_t *tt, uint32_t imm);
-static bool ttcleardvalid(tensix_t *tt, uint32_t imm);
-static bool ttsetrwc(tensix_t *tt, uint32_t imm);
-static bool ttincrwc(tensix_t *tt, uint32_t imm);
-static bool ttsetibrwc(tensix_t *tt, uint32_t imm);
-static bool ttmfconv3s1(tensix_t *tt, uint32_t imm);
-static bool ttxmov(tensix_t *tt, uint32_t imm);
-static bool ttpacr(tensix_t *tt, uint32_t imm);
-static bool ttunpacr(tensix_t *tt, uint32_t imm);
-static bool ttunpacr_nop(tensix_t *tt, uint32_t imm);
-static bool ttrstdma(tensix_t *tt, uint32_t imm);
-static bool ttsetdmareg(tensix_t *tt, uint32_t imm);
-static bool ttflushdma(tensix_t *tt, uint32_t imm);
-static bool ttreg2flop(tensix_t *tt, uint32_t imm);
-static bool ttloadind(tensix_t *tt, uint32_t imm);
-static bool ttpacr_setreg(tensix_t *tt, uint32_t imm);
-static bool tttbufcmd(tensix_t *tt, uint32_t imm);
-static bool ttsetadc(tensix_t *tt, uint32_t imm);
-static bool ttsetadcxy(tensix_t *tt, uint32_t imm);
-static bool ttincadcxy(tensix_t *tt, uint32_t imm);
-static bool ttaddrcrxy(tensix_t *tt, uint32_t imm);
-static bool ttsetadczw(tensix_t *tt, uint32_t imm);
-static bool ttincadczw(tensix_t *tt, uint32_t imm);
-static bool ttaddrcrzw(tensix_t *tt, uint32_t imm);
-static bool ttsetdvalid(tensix_t *tt, uint32_t imm);
-static bool ttadddmareg(tensix_t *tt, uint32_t imm);
-static bool ttsubdmareg(tensix_t *tt, uint32_t imm);
-static bool ttmuldmareg(tensix_t *tt, uint32_t imm);
-static bool ttbitwopdmareg(tensix_t *tt, uint32_t imm);
-static bool ttshiftdmareg(tensix_t *tt, uint32_t imm);
-static bool ttcmpdmareg(tensix_t *tt, uint32_t imm);
-static bool ttsetadcxx(tensix_t *tt, uint32_t imm);
-static bool ttdmanop(tensix_t *tt, uint32_t imm);
-static bool ttatincget(tensix_t *tt, uint32_t imm);
-static bool ttatincgetptr(tensix_t *tt, uint32_t imm);
-static bool ttatswap(tensix_t *tt, uint32_t imm);
-static bool ttatcas(tensix_t *tt, uint32_t imm);
-static bool ttstoreind(tensix_t *tt, uint32_t imm);
-static bool ttstorereg(tensix_t *tt, uint32_t imm);
-static bool ttloadreg(tensix_t *tt, uint32_t imm);
-static bool ttsfpload(tensix_t *tt, uint32_t imm);
-static bool ttsfploadi(tensix_t *tt, uint32_t imm);
-static bool ttsfpstore(tensix_t *tt, uint32_t imm);
-static bool ttsfplut(tensix_t *tt, uint32_t imm);
-static bool ttsfpmuli(tensix_t *tt, uint32_t imm);
-static bool ttsfpaddi(tensix_t *tt, uint32_t imm);
-static bool ttsfpdivp2(tensix_t *tt, uint32_t imm);
-static bool ttsfpexexp(tensix_t *tt, uint32_t imm);
-static bool ttsfpexman(tensix_t *tt, uint32_t imm);
-static bool ttsfpiadd(tensix_t *tt, uint32_t imm);
-static bool ttsfpshft(tensix_t *tt, uint32_t imm);
-static bool ttsfpsetcc(tensix_t *tt, uint32_t imm);
-static bool ttsfpmov(tensix_t *tt, uint32_t imm);
-static bool ttsfpabs(tensix_t *tt, uint32_t imm);
-static bool ttsfpand(tensix_t *tt, uint32_t imm);
-static bool ttsfpor(tensix_t *tt, uint32_t imm);
-static bool ttsfpnot(tensix_t *tt, uint32_t imm);
-static bool ttsfplz(tensix_t *tt, uint32_t imm);
-static bool ttsfpsetexp(tensix_t *tt, uint32_t imm);
-static bool ttsfpsetman(tensix_t *tt, uint32_t imm);
-static bool ttsfpmad(tensix_t *tt, uint32_t imm);
-static bool ttsfpadd(tensix_t *tt, uint32_t imm);
-static bool ttsfpmul(tensix_t *tt, uint32_t imm);
-static bool ttsfppushc(tensix_t *tt, uint32_t imm);
-static bool ttsfppopc(tensix_t *tt, uint32_t imm);
-static bool ttsfpsetsgn(tensix_t *tt, uint32_t imm);
-static bool ttsfpencc(tensix_t *tt, uint32_t imm);
-static bool ttsfpcompc(tensix_t *tt, uint32_t imm);
-static bool ttsfptransp(tensix_t *tt, uint32_t imm);
-static bool ttsfpxor(tensix_t *tt, uint32_t imm);
-static bool ttsfp_stoch_rnd(tensix_t *tt, uint32_t imm);
-static bool ttsfpnop(tensix_t *tt, uint32_t imm);
-static bool ttsfpcast(tensix_t *tt, uint32_t imm);
-static bool ttsfpconfig(tensix_t *tt, uint32_t imm);
-static bool ttsfpswap(tensix_t *tt, uint32_t imm);
-static bool ttsfploadmacro(tensix_t *tt, uint32_t imm);
-static bool ttsfpshft2(tensix_t *tt, uint32_t imm);
-static bool ttsfplutfp32(tensix_t *tt, uint32_t imm);
-static bool ttsfple(tensix_t *tt, uint32_t imm);
-static bool ttsfpgt(tensix_t *tt, uint32_t imm);
-static bool ttsfpmul24(tensix_t *tt, uint32_t imm);
-static bool ttsfparecip(tensix_t *tt, uint32_t imm);
-static bool ttatgetm(tensix_t *tt, uint32_t imm);
-static bool ttatrelm(tensix_t *tt, uint32_t imm);
-static bool ttstallwait(tensix_t *tt, uint32_t imm);
-static bool ttseminit(tensix_t *tt, uint32_t imm);
-static bool ttsempost(tensix_t *tt, uint32_t imm);
-static bool ttsemget(tensix_t *tt, uint32_t imm);
-static bool ttsemwait(tensix_t *tt, uint32_t imm);
-static bool ttstreamwait(tensix_t *tt, uint32_t imm);
-static bool ttwrcfg(tensix_t *tt, uint32_t imm);
-static bool ttrdcfg(tensix_t *tt, uint32_t imm);
-static bool ttsetc16(tensix_t *tt, uint32_t imm);
-static bool ttrmwcib0(tensix_t *tt, uint32_t imm);
-static bool ttrmwcib1(tensix_t *tt, uint32_t imm);
-static bool ttrmwcib2(tensix_t *tt, uint32_t imm);
-static bool ttrmwcib3(tensix_t *tt, uint32_t imm);
-static bool ttstreamwrcfg(tensix_t *tt, uint32_t imm);
-static bool ttcfgshiftmask(tensix_t *tt, uint32_t imm);
+static bool unimp(tensix_t *tt, uint32_t imm, int tid);
+static bool ttmop(tensix_t *tt, uint32_t imm, int tid);
+static bool ttnop(tensix_t *tt, uint32_t imm, int tid);
+static bool ttmop_cfg(tensix_t *tt, uint32_t imm, int tid);
+static bool ttreplay(tensix_t *tt, uint32_t imm, int tid);
+static bool ttresourcedecl(tensix_t *tt, uint32_t imm, int tid);
+static bool ttmovd2a(tensix_t *tt, uint32_t imm, int tid);
+static bool ttmovdbga2d(tensix_t *tt, uint32_t imm, int tid);
+static bool ttmovd2b(tensix_t *tt, uint32_t imm, int tid);
+static bool ttmovb2a(tensix_t *tt, uint32_t imm, int tid);
+static bool ttmovdbgb2d(tensix_t *tt, uint32_t imm, int tid);
+static bool ttzeroacc(tensix_t *tt, uint32_t imm, int tid);
+static bool ttzerosrc(tensix_t *tt, uint32_t imm, int tid);
+static bool ttmova2d(tensix_t *tt, uint32_t imm, int tid);
+static bool ttmovb2d(tensix_t *tt, uint32_t imm, int tid);
+static bool tttrnspsrca(tensix_t *tt, uint32_t imm, int tid);
+static bool ttrareb(tensix_t *tt, uint32_t imm, int tid);
+static bool tttrnspsrcb(tensix_t *tt, uint32_t imm, int tid);
+static bool ttshiftxa(tensix_t *tt, uint32_t imm, int tid);
+static bool ttshiftxb(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsetashrmh0(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsetashrmh1(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsetashrmv(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsetpkedgof(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsetashrmh(tensix_t *tt, uint32_t imm, int tid);
+static bool ttclrexphist(tensix_t *tt, uint32_t imm, int tid);
+static bool ttconv3s1(tensix_t *tt, uint32_t imm, int tid);
+static bool ttconv3s2(tensix_t *tt, uint32_t imm, int tid);
+static bool ttmpool3s1(tensix_t *tt, uint32_t imm, int tid);
+static bool ttapool3s1(tensix_t *tt, uint32_t imm, int tid);
+static bool ttmvmul(tensix_t *tt, uint32_t imm, int tid);
+static bool ttelwmul(tensix_t *tt, uint32_t imm, int tid);
+static bool ttelwadd(tensix_t *tt, uint32_t imm, int tid);
+static bool ttdotpv(tensix_t *tt, uint32_t imm, int tid);
+static bool ttelwsub(tensix_t *tt, uint32_t imm, int tid);
+static bool ttmpool3s2(tensix_t *tt, uint32_t imm, int tid);
+static bool ttapool3s2(tensix_t *tt, uint32_t imm, int tid);
+static bool ttgmpool(tensix_t *tt, uint32_t imm, int tid);
+static bool ttgapool(tensix_t *tt, uint32_t imm, int tid);
+static bool ttgatesrcrst(tensix_t *tt, uint32_t imm, int tid);
+static bool ttcleardvalid(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsetrwc(tensix_t *tt, uint32_t imm, int tid);
+static bool ttincrwc(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsetibrwc(tensix_t *tt, uint32_t imm, int tid);
+static bool ttmfconv3s1(tensix_t *tt, uint32_t imm, int tid);
+static bool ttxmov(tensix_t *tt, uint32_t imm, int tid);
+static bool ttpacr(tensix_t *tt, uint32_t imm, int tid);
+static bool ttunpacr(tensix_t *tt, uint32_t imm, int tid);
+static bool ttunpacr_nop(tensix_t *tt, uint32_t imm, int tid);
+static bool ttrstdma(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsetdmareg(tensix_t *tt, uint32_t imm, int tid);
+static bool ttflushdma(tensix_t *tt, uint32_t imm, int tid);
+static bool ttreg2flop(tensix_t *tt, uint32_t imm, int tid);
+static bool ttloadind(tensix_t *tt, uint32_t imm, int tid);
+static bool ttpacr_setreg(tensix_t *tt, uint32_t imm, int tid);
+static bool tttbufcmd(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsetadc(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsetadcxy(tensix_t *tt, uint32_t imm, int tid);
+static bool ttincadcxy(tensix_t *tt, uint32_t imm, int tid);
+static bool ttaddrcrxy(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsetadczw(tensix_t *tt, uint32_t imm, int tid);
+static bool ttincadczw(tensix_t *tt, uint32_t imm, int tid);
+static bool ttaddrcrzw(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsetdvalid(tensix_t *tt, uint32_t imm, int tid);
+static bool ttadddmareg(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsubdmareg(tensix_t *tt, uint32_t imm, int tid);
+static bool ttmuldmareg(tensix_t *tt, uint32_t imm, int tid);
+static bool ttbitwopdmareg(tensix_t *tt, uint32_t imm, int tid);
+static bool ttshiftdmareg(tensix_t *tt, uint32_t imm, int tid);
+static bool ttcmpdmareg(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsetadcxx(tensix_t *tt, uint32_t imm, int tid);
+static bool ttdmanop(tensix_t *tt, uint32_t imm, int tid);
+static bool ttatincget(tensix_t *tt, uint32_t imm, int tid);
+static bool ttatincgetptr(tensix_t *tt, uint32_t imm, int tid);
+static bool ttatswap(tensix_t *tt, uint32_t imm, int tid);
+static bool ttatcas(tensix_t *tt, uint32_t imm, int tid);
+static bool ttstoreind(tensix_t *tt, uint32_t imm, int tid);
+static bool ttstorereg(tensix_t *tt, uint32_t imm, int tid);
+static bool ttloadreg(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpload(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfploadi(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpstore(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfplut(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpmuli(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpaddi(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpdivp2(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpexexp(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpexman(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpiadd(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpshft(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpsetcc(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpmov(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpabs(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpand(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpor(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpnot(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfplz(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpsetexp(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpsetman(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpmad(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpadd(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpmul(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfppushc(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfppopc(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpsetsgn(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpencc(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpcompc(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfptransp(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpxor(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfp_stoch_rnd(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpnop(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpcast(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpconfig(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpswap(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfploadmacro(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpshft2(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfplutfp32(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfple(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpgt(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfpmul24(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsfparecip(tensix_t *tt, uint32_t imm, int tid);
+static bool ttatgetm(tensix_t *tt, uint32_t imm, int tid);
+static bool ttatrelm(tensix_t *tt, uint32_t imm, int tid);
+static bool ttstallwait(tensix_t *tt, uint32_t imm, int tid);
+static bool ttseminit(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsempost(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsemget(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsemwait(tensix_t *tt, uint32_t imm, int tid);
+static bool ttstreamwait(tensix_t *tt, uint32_t imm, int tid);
+static bool ttwrcfg(tensix_t *tt, uint32_t imm, int tid);
+static bool ttrdcfg(tensix_t *tt, uint32_t imm, int tid);
+static bool ttsetc16(tensix_t *tt, uint32_t imm, int tid);
+static bool ttrmwcib0(tensix_t *tt, uint32_t imm, int tid);
+static bool ttrmwcib1(tensix_t *tt, uint32_t imm, int tid);
+static bool ttrmwcib2(tensix_t *tt, uint32_t imm, int tid);
+static bool ttrmwcib3(tensix_t *tt, uint32_t imm, int tid);
+static bool ttstreamwrcfg(tensix_t *tt, uint32_t imm, int tid);
+static bool ttcfgshiftmask(tensix_t *tt, uint32_t imm, int tid);
 
 /* Macro to simplify jump table creation */
 #define OP(name) name
@@ -182,12 +185,12 @@ const insn_impl tt_jump_table[256] = {
 /* Execute an instruction using the jump table.
  * Returns true if completed, false if blocked/incomplete.
  */
-bool tensix_execute_insn(tensix_t *tt, uint32_t insn)
+bool tensix_execute_insn(tensix_t *tt, uint32_t insn, int tid)
 {
     uint8_t opcode = (insn >> 24) & 0xFF;
     uint32_t imm = insn & 0x00FFFFFF;
 
-    return tt_jump_table[opcode](tt, imm);
+    return tt_jump_table[opcode](tt, imm, tid);
 }
 
 /*
@@ -200,30 +203,30 @@ bool tensix_execute_insn(tensix_t *tt, uint32_t insn)
  *   ADDR_MOD_DST: thd_reg[28+i] - bits[9:0]=incr, bit10=cr, bit11=clr,
  *                                  bit12=c_to_cr, bits[14:13]=fidelity_incr, bit15=fidelity_clr
  */
-static void apply_addr_mod(tensix_t *tt, uint32_t mod_idx)
+static void apply_addr_mod(tensix_t *tt, uint32_t mod_idx, int tid)
 {
     if (mod_idx >= 8) return;
 
-    uint32_t ab_reg  = tt->thd_reg[tt->thread_id][12 + mod_idx];
-    uint32_t dst_reg = tt->thd_reg[tt->thread_id][28 + mod_idx];
+    uint32_t ab_reg  = tt->thd_reg[tid][12 + mod_idx];
+    uint32_t dst_reg = tt->thd_reg[tid][28 + mod_idx];
 
     /* SrcA: increment, then handle clr/cr */
     uint32_t srca_incr = ab_reg & 0x3F;
     uint32_t srca_cr   = (ab_reg >> 6) & 1;
     uint32_t srca_clr  = (ab_reg >> 7) & 1;
 
-    tt->srca_rwc += srca_incr;
-    if (srca_clr) tt->srca_rwc = 0;
-    if (srca_cr)  tt->srca_rwc = tt->srca_rwc_cr;
+    tt->srca_rwc[tid] += srca_incr;
+    if (srca_clr) tt->srca_rwc[tid] = 0;
+    if (srca_cr)  tt->srca_rwc[tid] = tt->srca_rwc_cr[tid];
 
     /* SrcB */
     uint32_t srcb_incr = (ab_reg >> 8) & 0x3F;
     uint32_t srcb_cr   = (ab_reg >> 14) & 1;
     uint32_t srcb_clr  = (ab_reg >> 15) & 1;
 
-    tt->srcb_rwc += srcb_incr;
-    if (srcb_clr) tt->srcb_rwc = 0;
-    if (srcb_cr)  tt->srcb_rwc = tt->srcb_rwc_cr;
+    tt->srcb_rwc[tid] += srcb_incr;
+    if (srcb_clr) tt->srcb_rwc[tid] = 0;
+    if (srcb_cr)  tt->srcb_rwc[tid] = tt->srcb_rwc_cr[tid];
 
     /* Dest: increment, snapshot to Cr if c_to_cr, then handle clr/cr */
     uint32_t dest_incr   = dst_reg & 0x3FF;
@@ -233,28 +236,28 @@ static void apply_addr_mod(tensix_t *tt, uint32_t mod_idx)
     uint32_t fid_incr    = (dst_reg >> 13) & 0x3;
     uint32_t fid_clr     = (dst_reg >> 15) & 1;
 
-    tt->dest_rwc += dest_incr;
-    if (dest_c2cr) tt->dest_rwc_cr = tt->dest_rwc;
-    if (dest_clr) tt->dest_rwc = 0;
-    if (dest_cr)  tt->dest_rwc = tt->dest_rwc_cr;
+    tt->dest_rwc[tid] += dest_incr;
+    if (dest_c2cr) tt->dest_rwc_cr[tid] = tt->dest_rwc[tid];
+    if (dest_clr) tt->dest_rwc[tid] = 0;
+    if (dest_cr)  tt->dest_rwc[tid] = tt->dest_rwc_cr[tid];
 
     /* Fidelity */
-    tt->fidelity += fid_incr;
-    if (fid_clr) tt->fidelity = 0;
+    tt->fidelity[tid] += fid_incr;
+    if (fid_clr) tt->fidelity[tid] = 0;
 }
 
 /*
  * Instruction implementations
  */
 
-static bool unimp(tensix_t *tt, uint32_t imm) {
+static bool unimp(tensix_t *tt, uint32_t imm, int tid) {
     (void)tt;
     (void)imm;
     /* Unimplemented instruction - do nothing */
     return true;
 }
 
-static bool ttnop(tensix_t *tt, uint32_t imm) {
+static bool ttnop(tensix_t *tt, uint32_t imm, int tid) {
     (void)tt;
     (void)imm;
     /* No operation */
@@ -266,12 +269,12 @@ static bool ttnop(tensix_t *tt, uint32_t imm) {
  * cfg_idx 0-8: Set mop_cfg[idx] = cfg_value
  * cfg_idx 9: Set high 16 bits of zmask (zmask_hi16)
  */
-static bool ttmop_cfg(tensix_t *tt, uint32_t imm) {
+static bool ttmop_cfg(tensix_t *tt, uint32_t imm, int tid) {
     if (!tt->cop) return true;
 
     uint32_t cfg_idx = (imm >> 20) & 0xF;
     uint32_t cfg_value = imm & 0xFFFFF;
-    int thread_id = tt->thread_id;
+    int thread_id = tid;
 
     if (cfg_idx < 9) {
         tt->cop->threads[thread_id].mop_cfg[cfg_idx] = cfg_value;
@@ -287,22 +290,22 @@ static bool ttmop_cfg(tensix_t *tt, uint32_t imm) {
  * Encoding: template[23] | count1[22:16] | zmask_lo16[15:0] (for template 0)
  *           template[23] | loop_op1[22:0] (for template 1)
  */
-static bool ttmop(tensix_t *tt, uint32_t imm) {
+static bool ttmop(tensix_t *tt, uint32_t imm, int tid) {
     if (!tt->cop) return true;
 
-    int thread_id = tt->thread_id;
+    int thread_id = tid;
     TT_DBG("[MOP] Expanding MOP, param=0x%06x, thread=%d\n", imm, thread_id);
     tensix_cop_mop_expand(tt->cop, thread_id, imm);
     return true;
 }
-static bool ttreplay(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttresourcedecl(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttmovd2a(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttmovdbga2d(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttmovd2b(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttmovb2a(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttmovdbgb2d(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttzeroacc(tensix_t *tt, uint32_t imm) {
+static bool ttreplay(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttresourcedecl(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttmovd2a(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttmovdbga2d(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttmovd2b(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttmovb2a(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttmovdbgb2d(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttzeroacc(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_ZEROACC(clear_mode, use_32_bit_mode, clear_zero_flags, addr_mode, where)
      * Encoding: clear_mode<<19 | use_32_bit_mode<<18 | clear_zero_flags<<17 | addr_mode<<14 | where<<0
      * clear_mode[1:0] = Mode: 0=one row, 1=16 rows, 2=half Dst, 3=all Dst
@@ -318,7 +321,7 @@ static bool ttzeroacc(tensix_t *tt, uint32_t imm) {
     switch (mode) {
     case 0: /* ONE_ROW */
     {
-        uint32_t row = where + tt->dest_rwc;
+        uint32_t row = where + tt->dest_rwc[tid];
         if (row < DEST_ROWS) {
             for (int j = 0; j < ROW_SIZE; j++)
                 tt->dest[row][j] = 0.0f;
@@ -354,7 +357,7 @@ static bool ttzeroacc(tensix_t *tt, uint32_t imm) {
     }
     return true;
 }
-static bool ttzerosrc(tensix_t *tt, uint32_t imm) {
+static bool ttzerosrc(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_ZEROSRC(zero_val, write_mode, bank_mask, src_mask)
      * Encoding: zero_val<<4 | write_mode<<3 | bank_mask<<2 | src_mask<<0
      * zero_val (bool): 1 = fill SrcA with negative infinity instead of zero
@@ -385,26 +388,81 @@ static bool ttzerosrc(tensix_t *tt, uint32_t imm) {
     }
     return true;
 }
-static bool ttmova2d(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttmovb2d(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool tttrnspsrca(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttrareb(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool tttrnspsrcb(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttshiftxa(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttshiftxb(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsetashrmh0(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsetashrmh1(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsetashrmv(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsetpkedgof(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsetashrmh(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttclrexphist(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttconv3s1(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttconv3s2(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttmpool3s1(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttapool3s1(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttmvmul(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttelwmul(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttelwadd(tensix_t *tt, uint32_t imm) {
+static bool ttmova2d(tensix_t *tt, uint32_t imm, int tid) {
+    /* ckernel_ops.h: TT_OP_MOVA2D(dest_32b_lo, src, addr_mode, instr_mod, dst)
+     * Encoding: dest_32b_lo<<23 | src<<17 | addr_mode<<14 | instr_mod<<12 | dst<<0
+     *
+     * ISA (MOVA2D.md): Move 1 or 8 rows from SrcA to Dest.
+     *   dest_32b_lo: write to low 16 bits of Dst32b (rare usage)
+     *   src[5:0]: SrcRow base
+     *   addr_mode[2:0]: AddrMod index
+     *   instr_mod[1:0] (bits[13:12]): ISA syntax (Move8Rows)<<1, so Move8Rows = instr_mod>>1
+     *   dst[11:0]: DstRow base
+     */
+    uint32_t addr_mode  = (imm >> 14) & 0x7;
+    uint32_t instr_mod  = (imm >> 12) & 0x3;
+    uint32_t move8rows  = (instr_mod >> 1) & 0x1;
+    uint32_t src_row    = (imm >> 17) & 0x3F;
+    uint32_t dst_row    = imm & 0xFFF;
+
+    /* Determine row range.
+     * ISA: DstRow += ThreadConfig.DEST_TARGET_REG_CFG_MATH_Offset (thd_reg[1])
+     *      DstRow += RWCs.Dst + ConfigState.DEST_REGW_BASE_Base
+     * We use thd_reg[thread_id][1] for the Math Offset set by SETC16.
+     */
+    unsigned num_rows;
+    uint32_t math_offset = tt->thd_reg[tid][1];
+    uint32_t srca_row = src_row + tt->srca_rwc[tid];
+    uint32_t dest_base = dst_row + math_offset + tt->dest_rwc[tid];
+    if (move8rows) {
+        num_rows = 8;
+        dest_base &= 0x3F8;
+        srca_row &= 0x38;
+    } else {
+        num_rows = 1;
+        dest_base &= 0x3FF;
+        srca_row &= 0x3F;
+    }
+
+    /* Copy SrcA rows to Dest (simplified: BF16-as-float passthrough) */
+    for (unsigned i = 0; i < num_rows; i++) {
+        uint32_t sa_idx = srca_row + i;
+        uint32_t d_idx  = dest_base + i;
+        if (sa_idx >= SRCA_ROWS || d_idx >= DEST_ROWS)
+            continue;
+        for (int j = 0; j < ROW_SIZE; j++) {
+            tt->dest[d_idx][j] = tt->srca[sa_idx][j];
+        }
+    }
+
+    TT_DBG("[MOVA2D] srca_row=%d, dest_base=%d, num_rows=%d\n",
+           srca_row, dest_base, num_rows);
+
+    /* Note: srca_dvalid is NOT cleared here. It is cleared by SETRWC
+     * (clear_ab_vld) which appears as end_op0 in the MOP template. */
+
+    apply_addr_mod(tt, addr_mode, tid);
+    return true;
+}
+static bool ttmovb2d(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool tttrnspsrca(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttrareb(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool tttrnspsrcb(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttshiftxa(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttshiftxb(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsetashrmh0(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsetashrmh1(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsetashrmv(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsetpkedgof(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsetashrmh(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttclrexphist(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttconv3s1(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttconv3s2(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttmpool3s1(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttapool3s1(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttmvmul(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttelwmul(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttelwadd(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_ELWADD(clear_dvalid, dest_accum_en, instr_mod19, addr_mode, dst)
      * Encoding: clear_dvalid<<22 | dest_accum_en<<21 | instr_mod19<<19 | addr_mode<<14 | dst<<0
      *
@@ -440,9 +498,9 @@ static bool ttelwadd(tensix_t *tt, uint32_t imm) {
     bool bcast_srcb_col0 = instr_mod19 & 0x1;
 
     /* Determine row indices */
-    uint32_t srca_row = tt->srca_rwc & 0x38;
-    uint32_t srcb_row = tt->srcb_rwc & (bcast_srcb_row ? 0x3F : 0x38);
-    uint32_t dest_base = (dst_row + tt->dest_rwc + tt->dest_offset) & 0x3F8;
+    uint32_t srca_row = tt->srca_rwc[tid] & 0x38;
+    uint32_t srcb_row = tt->srcb_rwc[tid] & (bcast_srcb_row ? 0x3F : 0x38);
+    uint32_t dest_base = (dst_row + tt->dest_rwc[tid] + tt->dest_offset) & 0x3F8;
 
     /* Element-wise add: 8 rows x 16 columns */
     TT_DBG("[ELWADD] srca_row=%d, srcb_row=%d, dest_base=%d, srca_dvalid=%d, srcb_dvalid=%d\n",
@@ -492,17 +550,17 @@ static bool ttelwadd(tensix_t *tt, uint32_t imm) {
     if (flip_srcb) tt->srcb_dvalid = false;
 
     /* Apply address modifier */
-    apply_addr_mod(tt, addr_mode);
+    apply_addr_mod(tt, addr_mode, tid);
     return true;
 }
-static bool ttdotpv(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttelwsub(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttmpool3s2(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttapool3s2(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttgmpool(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttgapool(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttgatesrcrst(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttcleardvalid(tensix_t *tt, uint32_t imm) {
+static bool ttdotpv(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttelwsub(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttmpool3s2(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttapool3s2(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttgmpool(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttgapool(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttgatesrcrst(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttcleardvalid(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_CLEARDVALID(cleardvalid, reset)
      * Encoding: cleardvalid<<22 | reset<<0
      * cleardvalid[1:0]: bit0=FlipSrcA, bit1=FlipSrcB
@@ -528,7 +586,7 @@ static bool ttcleardvalid(tensix_t *tt, uint32_t imm) {
     }
     return true;
 }
-static bool ttsetrwc(tensix_t *tt, uint32_t imm) {
+static bool ttsetrwc(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_SETRWC(clear_ab_vld, rwc_cr, rwc_d, rwc_b, rwc_a, BitMask)
      * Encoding: clear_ab_vld<<22 | rwc_cr<<18 | rwc_d<<14 | rwc_b<<10 | rwc_a<<6 | BitMask<<0
      *
@@ -551,28 +609,28 @@ static bool ttsetrwc(tensix_t *tt, uint32_t imm) {
     if (bitmask & 0x1) {  /* SrcA */
         uint32_t val = rwc_a;
         if (rwc_cr & 0x1)  /* SrcACr */
-            val += tt->srca_rwc_cr;
-        tt->srca_rwc = val;
-        tt->srca_rwc_cr = val;
+            val += tt->srca_rwc_cr[tid];
+        tt->srca_rwc[tid] = val;
+        tt->srca_rwc_cr[tid] = val;
     }
     if (bitmask & 0x2) {  /* SrcB */
         uint32_t val = rwc_b;
         if (rwc_cr & 0x2)  /* SrcBCr */
-            val += tt->srcb_rwc_cr;
-        tt->srcb_rwc = val;
-        tt->srcb_rwc_cr = val;
+            val += tt->srcb_rwc_cr[tid];
+        tt->srcb_rwc[tid] = val;
+        tt->srcb_rwc_cr[tid] = val;
     }
     if (bitmask & 0x4) {  /* Dst */
         uint32_t val = rwc_d;
         if (rwc_cr & 0x8)       /* DstCtoCr */
-            val += tt->dest_rwc;
+            val += tt->dest_rwc[tid];
         else if (rwc_cr & 0x4)  /* DstCr */
-            val += tt->dest_rwc_cr;
-        tt->dest_rwc = val;
-        tt->dest_rwc_cr = val;
+            val += tt->dest_rwc_cr[tid];
+        tt->dest_rwc[tid] = val;
+        tt->dest_rwc_cr[tid] = val;
     }
     if (bitmask & 0x8) {  /* Fidelity */
-        tt->fidelity = 0;
+        tt->fidelity[tid] = 0;
     }
 
     /* FlipSrcA / FlipSrcB */
@@ -582,7 +640,7 @@ static bool ttsetrwc(tensix_t *tt, uint32_t imm) {
         tt->srcb_dvalid = false;
     return true;
 }
-static bool ttincrwc(tensix_t *tt, uint32_t imm) {
+static bool ttincrwc(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_INCRWC(rwc_cr, rwc_d, rwc_b, rwc_a)
      * Encoding: rwc_cr<<18 | rwc_d<<14 | rwc_b<<10 | rwc_a<<6
      *
@@ -601,30 +659,30 @@ static bool ttincrwc(tensix_t *tt, uint32_t imm) {
     uint32_t rwc_a  = (imm >>  6) & 0xF;
 
     if (rwc_cr & 0x1) {  /* SrcACr */
-        tt->srca_rwc_cr += rwc_a;
-        tt->srca_rwc = tt->srca_rwc_cr;
+        tt->srca_rwc_cr[tid] += rwc_a;
+        tt->srca_rwc[tid] = tt->srca_rwc_cr[tid];
     } else {
-        tt->srca_rwc += rwc_a;
+        tt->srca_rwc[tid] += rwc_a;
     }
 
     if (rwc_cr & 0x2) {  /* SrcBCr */
-        tt->srcb_rwc_cr += rwc_b;
-        tt->srcb_rwc = tt->srcb_rwc_cr;
+        tt->srcb_rwc_cr[tid] += rwc_b;
+        tt->srcb_rwc[tid] = tt->srcb_rwc_cr[tid];
     } else {
-        tt->srcb_rwc += rwc_b;
+        tt->srcb_rwc[tid] += rwc_b;
     }
 
     if (rwc_cr & 0x4) {  /* DstCr */
-        tt->dest_rwc_cr += rwc_d;
-        tt->dest_rwc = tt->dest_rwc_cr;
+        tt->dest_rwc_cr[tid] += rwc_d;
+        tt->dest_rwc[tid] = tt->dest_rwc_cr[tid];
     } else {
-        tt->dest_rwc += rwc_d;
+        tt->dest_rwc[tid] += rwc_d;
     }
     return true;
 }
-static bool ttsetibrwc(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttmfconv3s1(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttxmov(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
+static bool ttsetibrwc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttmfconv3s1(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttxmov(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 
 /*
  * Data format conversion helpers for UNPACR/PACR
@@ -757,7 +815,7 @@ static uint32_t float_to_datum(float f, uint32_t fmt)
     }
 }
 
-static bool ttpacr(tensix_t *tt, uint32_t imm) {
+static bool ttpacr(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_PACR(CfgContext, RowPadZero, DstAccessMode, AddrMode,
      *   AddrCntContext, ZeroWrite, ReadIntfSel, OvrdThreadId, Concat, CtxtCtrl,
      *   Flush, Last)
@@ -784,7 +842,7 @@ static bool ttpacr(tensix_t *tt, uint32_t imm) {
     /* PackerMask 0b0000 is rewritten to 0b0001 */
     if (packer_mask == 0) packer_mask = 1;
 
-    uint32_t state_id = tt->cfg_state_id[tt->thread_id] & 0x1;
+    uint32_t state_id = tt->thd_reg[tid][0] & 0x1;
     AddrCtrl *adc = &tt->adc[2]; /* Packer ADC */
 
     /*
@@ -877,7 +935,7 @@ static bool ttpacr(tensix_t *tt, uint32_t imm) {
             num_datums = 0;
         } else {
             uint32_t x_count = (adc->ch1_x >= adc->ch0_x) ? (adc->ch1_x - adc->ch0_x + 1) : 0;
-            uint32_t pack_reg0 = tt->thd_reg[tt->thread_id][37]; /* always addr_mod[0] */
+            uint32_t pack_reg0 = tt->thd_reg[tid][37]; /* always addr_mod[0] */
             uint32_t ysrc_incr0 = pack_reg0 & 0xF;
             uint32_t y_count = (ysrc_incr0 > 0) ? ysrc_incr0 : 1;
             num_datums = x_count * y_count;
@@ -907,7 +965,7 @@ static bool ttpacr(tensix_t *tt, uint32_t imm) {
         /* Dest is 16 columns wide; one row = 16 datums */
         uint32_t ystride_datums = 16;
 
-        uint32_t pack_reg0 = tt->thd_reg[tt->thread_id][37];
+        uint32_t pack_reg0 = tt->thd_reg[tid][37];
         uint32_t ysrc_incr0 = pack_reg0 & 0xF;
         uint32_t y_count = (ysrc_incr0 > 0) ? ysrc_incr0 : 1;
         uint32_t x_count = (num_datums > 0) ? num_datums / y_count : 0;
@@ -943,7 +1001,7 @@ static bool ttpacr(tensix_t *tt, uint32_t imm) {
      *   bits[9:6]=Y_dst_incr, bit10=Y_dst_cr, bit11=Y_dst_clr,
      *   bit12=Z_src_incr, bit13=Z_src_clr, bit14=Z_dst_incr, bit15=Z_dst_clr
      */
-    uint32_t pack_reg = (addr_mode < 4) ? tt->thd_reg[tt->thread_id][37 + addr_mode] : 0;
+    uint32_t pack_reg = (addr_mode < 4) ? tt->thd_reg[tid][37 + addr_mode] : 0;
 
     uint32_t ysrc_incr = pack_reg & 0xF;
     uint32_t ysrc_cr   = (pack_reg >> 4) & 1;
@@ -976,7 +1034,7 @@ static bool ttpacr(tensix_t *tt, uint32_t imm) {
 
     return true;
 }
-static bool ttunpacr(tensix_t *tt, uint32_t imm) {
+static bool ttunpacr(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_UNPACR(Unpack_block_selection, AddrMode,
      *   CfgContextCntInc, CfgContextId, AddrCntContextId, OvrdThreadId,
      *   SetDatValid, srcb_bcast, ZeroWrite2, AutoIncContextID,
@@ -994,7 +1052,7 @@ static bool ttunpacr(tensix_t *tt, uint32_t imm) {
     uint32_t cfg_ctx_cnt_inc  = (imm >> 13) & 0x3;
     /* uint32_t cfg_ctx_id    = (imm >> 10) & 0x7; */
     /* uint32_t adc_ctx_id    = (imm >> 8) & 0x3; */
-    /* uint32_t ovrd_thread   = (imm >> 7) & 0x1; */
+    uint32_t multi_ctx_mode   = (imm >> 7) & 0x1;
     uint32_t set_dat_valid    = (imm >> 6) & 0x1;
     /* uint32_t srcb_bcast    = (imm >> 5) & 0x1; */
     uint32_t zero_write       = (imm >> 4) & 0x1;
@@ -1021,16 +1079,55 @@ static bool ttunpacr(tensix_t *tt, uint32_t imm) {
      *   THCON_SEC0: TileDescriptor@64, REG2@72, REG3@76, REG7@92, UNP0_BASE1@49, UNP0_XY1@56, UNP0_ZW1@57
      *   THCON_SEC1: TileDescriptor@112, REG2@120, REG3@124, REG7@140, UNP1_BASE1@61, UNP1_XY1@58, UNP1_ZW1@59
      */
-    uint32_t state_id = tt->cfg_state_id[tt->thread_id] & 0x1;
+    /* StateID from ThreadConfig[CurrentThread].CFG_STATE_ID_StateID (ADDR32=0, bit 0).
+     * Selects which Config bank (Config[0] vs Config[1]) to read from.
+     * Config[1] registers are at offset +224 (CFG_STATE_SIZE*4) from Config[0].
+     */
+    uint32_t state_id = tt->thd_reg[tid][0] & 0x1;
+    uint32_t cfg_bank_offset = state_id * 224;
+
+    /* MultiContextMode: determine which config context to use.
+     * ISA: WhichContext = ContextCounter + CfgContextOffset[WhichUnpacker]
+     * CfgContextOffset is stored in ThreadConfig register 41 (UNPACK_MISC_CFG):
+     *   CfgContextOffset_0: bits[3:0]  (for unpacker 0)
+     *   CfgContextOffset_1: bits[11:8] (for unpacker 1)
+     * When WhichContext != 0, use REG3_Base_cntx[N] and REG7_Offset_cntx[N]
+     * instead of REG3_Base_address and REG7_Offset_address.
+     */
+    uint32_t which_ctx = 0;
+    if (multi_ctx_mode) {
+        uint32_t misc_cfg = tt->thd_reg[tid][41];
+        uint32_t ctx_offset = (which_unp == 0) ? (misc_cfg & 0xF) : ((misc_cfg >> 8) & 0xF);
+        /* TODO: add ContextCounter support when needed */
+        which_ctx = ctx_offset & 0x3; /* max 4 contexts */
+    }
 
     /* Config register offsets based on which unpacker */
     uint32_t td_base     = (which_unp == 0) ? 64  : 112; /* TileDescriptor */
     uint32_t reg2_off    = (which_unp == 0) ? 72  : 120; /* Out_data_format */
-    uint32_t reg3_off    = (which_unp == 0) ? 76  : 124; /* Base_address */
-    uint32_t reg7_off    = (which_unp == 0) ? 92  : 140; /* Offset_address */
+    uint32_t reg3_off    = (which_unp == 0) ? 76  : 124; /* Base_address (context 0) */
+    uint32_t reg7_off    = (which_unp == 0) ? 92  : 140; /* Offset_address (context 0) */
     uint32_t out_base_off = (which_unp == 0) ? 49 : 61;  /* ADDR_BASE_REG_1 */
     uint32_t out_xy_off  = (which_unp == 0) ? 56  : 58;  /* ADDR_CTRL_XY_REG_1 */
     uint32_t out_zw_off  = (which_unp == 0) ? 57  : 59;  /* ADDR_CTRL_ZW_REG_1 */
+
+    /* In MultiContextMode with context != 0, use context-specific registers.
+     * SEC0: Base_cntx[1..3] = reg 77..79, Offset_cntx[1..3] = reg 93..95
+     * SEC1: Base_cntx[1..3] = reg 125..127, Offset_cntx[1..3] = reg 141..143
+     */
+    if (which_ctx != 0) {
+        reg3_off += which_ctx;  /* 76+1=77, 76+2=78, 76+3=79 (or 124+N for SEC1) */
+        reg7_off += which_ctx;  /* 92+1=93, 92+2=94, 92+3=95 (or 140+N for SEC1) */
+    }
+
+    /* Apply Config bank offset: Config[0] at base, Config[1] at +224 */
+    td_base += cfg_bank_offset;
+    reg2_off += cfg_bank_offset;
+    reg3_off += cfg_bank_offset;
+    reg7_off += cfg_bank_offset;
+    out_base_off += cfg_bank_offset;
+    out_xy_off += cfg_bank_offset;
+    out_zw_off += cfg_bank_offset;
 
     /* Read TileDescriptor (128-bit = 4 x 32-bit words) from high_mem */
     uint32_t td0 = tensix_read_cfg(&tt->mem, td_base + 0);
@@ -1171,9 +1268,9 @@ static bool ttunpacr(tensix_t *tt, uint32_t imm) {
     adc->ch1_z += ch1_z_inc;
     return true;
 }
-static bool ttunpacr_nop(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttrstdma(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsetdmareg(tensix_t *tt, uint32_t imm) {
+static bool ttunpacr_nop(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttrstdma(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsetdmareg(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_SETDMAREG(Payload_SigSelSize, Payload_SigSel, SetSignalsMode, RegIndex16b)
      * Encoding: Payload_SigSelSize<<22 | Payload_SigSel<<8 | SetSignalsMode<<7 | RegIndex16b<<0
      *
@@ -1201,7 +1298,7 @@ static bool ttsetdmareg(tensix_t *tt, uint32_t imm) {
         /* Immediate mode: write 16-bit value to GPR half.
          * bits 23:8 = 16-bit immediate value */
         uint16_t value = (uint16_t)((imm >> 8) & 0xFFFF);
-        uint16_t *half_regs = (uint16_t *)&tt->dma_reg[tt->thread_id][0];
+        uint16_t *half_regs = (uint16_t *)&tt->dma_reg[tid][0];
         if (reg_index < (DMA_REG_COUNT * 2)) {  /* 64 regs * 2 halves = 128 */
             half_regs[reg_index] = value;
         }
@@ -1219,7 +1316,7 @@ static bool ttsetdmareg(tensix_t *tt, uint32_t imm) {
         /* uint32_t which_packers  = (imm >> 15) & 0xF; */
 
         uint32_t result_half = reg_index;
-        uint32_t *gprs = tt->dma_reg[tt->thread_id];
+        uint32_t *gprs = tt->dma_reg[tid];
 
         /* Values from packer state - all zeros in emulator */
         uint32_t values[4] = {0, 0, 0, 0};
@@ -1277,13 +1374,13 @@ static bool ttsetdmareg(tensix_t *tt, uint32_t imm) {
     }
     return true;
 }
-static bool ttflushdma(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttreg2flop(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttloadind(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttpacr_setreg(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool tttbufcmd(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsetadc(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsetadcxy(tensix_t *tt, uint32_t imm) {
+static bool ttflushdma(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttreg2flop(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttloadind(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttpacr_setreg(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool tttbufcmd(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsetadc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsetadcxy(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_SETADCXY(CntSetMask, Ch1_Y, Ch1_X, Ch0_Y, Ch0_X, BitMask)
      * Encoding: CntSetMask<<21 | Ch1_Y<<15 | Ch1_X<<12 | Ch0_Y<<9 | Ch0_X<<6 | BitMask<<0
      *
@@ -1317,9 +1414,9 @@ static bool ttsetadcxy(tensix_t *tt, uint32_t imm) {
     }
     return true;
 }
-static bool ttincadcxy(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttaddrcrxy(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsetadczw(tensix_t *tt, uint32_t imm) {
+static bool ttincadcxy(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttaddrcrxy(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsetadczw(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_SETADCZW(CntSetMask, Ch1_W, Ch1_Z, Ch0_W, Ch0_Z, BitMask)
      * Encoding: CntSetMask<<21 | Ch1_W<<15 | Ch1_Z<<12 | Ch0_W<<9 | Ch0_Z<<6 | BitMask<<0
      *
@@ -1344,9 +1441,9 @@ static bool ttsetadczw(tensix_t *tt, uint32_t imm) {
     }
     return true;
 }
-static bool ttincadczw(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttaddrcrzw(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsetdvalid(tensix_t *tt, uint32_t imm) {
+static bool ttincadczw(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttaddrcrzw(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsetdvalid(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_SETDVALID(setvalid)
      * Encoding: setvalid<<0 (24-bit field, only bits[1:0] meaningful)
      *
@@ -1360,13 +1457,13 @@ static bool ttsetdvalid(tensix_t *tt, uint32_t imm) {
         tt->srcb_dvalid = true;
     return true;
 }
-static bool ttadddmareg(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsubdmareg(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttmuldmareg(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttbitwopdmareg(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttshiftdmareg(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttcmpdmareg(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsetadcxx(tensix_t *tt, uint32_t imm) {
+static bool ttadddmareg(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsubdmareg(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttmuldmareg(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttbitwopdmareg(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttshiftdmareg(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttcmpdmareg(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsetadcxx(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_SETADCXX(CntSetMask, x_end2, x_start)
      * Encoding: CntSetMask<<21 | x_end2<<10 | x_start<<0
      *
@@ -1391,13 +1488,13 @@ static bool ttsetadcxx(tensix_t *tt, uint32_t imm) {
     }
     return true;
 }
-static bool ttdmanop(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttatincget(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttatincgetptr(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttatswap(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttatcas(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttstoreind(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttstorereg(tensix_t *tt, uint32_t imm) {
+static bool ttdmanop(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttatincget(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttatincgetptr(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttatswap(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttatcas(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttstoreind(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttstorereg(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_STOREREG(TdmaDataRegIndex, RegAddr)
      * Encoding: TdmaDataRegIndex<<18 | RegAddr<<0
      *
@@ -1423,7 +1520,7 @@ static bool ttstorereg(tensix_t *tt, uint32_t imm) {
     }
 
     /* Read value from DMA register */
-    uint32_t value = tt->dma_reg[tt->thread_id][data_reg];
+    uint32_t value = tt->dma_reg[tid][data_reg];
 
     /* Calculate offset in high_mem (high_mem maps 0xFFB00000 - 0xFFEFFFFF) */
     uint32_t offset = target_addr - 0xFFB00000;
@@ -1450,7 +1547,7 @@ static bool ttstorereg(tensix_t *tt, uint32_t imm) {
     }
     return true;
 }
-static bool ttloadreg(tensix_t *tt, uint32_t imm) {
+static bool ttloadreg(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_LOADREG(TdmaDataRegIndex, RegAddr)
      * Encoding: TdmaDataRegIndex<<18 | RegAddr<<0
      *
@@ -1479,68 +1576,154 @@ static bool ttloadreg(tensix_t *tt, uint32_t imm) {
     }
 
     if (result_reg < DMA_REG_COUNT) {
-        tt->dma_reg[tt->thread_id][result_reg] = value;
+        tt->dma_reg[tid][result_reg] = value;
     }
     return true;
 }
-static bool ttsfpload(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfploadi(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpstore(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfplut(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpmuli(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpaddi(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpdivp2(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpexexp(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpexman(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpiadd(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpshft(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpsetcc(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpmov(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpabs(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpand(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpor(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpnot(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfplz(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpsetexp(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpsetman(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpmad(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpadd(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpmul(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfppushc(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfppopc(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpsetsgn(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpencc(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpcompc(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfptransp(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpxor(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfp_stoch_rnd(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpnop(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpcast(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpconfig(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpswap(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfploadmacro(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpshft2(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfplutfp32(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfple(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpgt(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfpmul24(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttsfparecip(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttatgetm(tensix_t *tt, uint32_t imm) {
+static bool ttsfpload(tensix_t *tt, uint32_t imm, int tid) {
+    /* ckernel_ops.h: TT_OP_SFPLOAD(lreg_ind, instr_mod0, sfpu_addr_mode, dest_reg_addr)
+     * Encoding: lreg_ind<<20 | instr_mod0<<16 | sfpu_addr_mode<<13 | dest_reg_addr<<0
+     * Bits:     [23:20](4)    [19:16](4)       [15:13](3)           [12:0](13)
+     */
+    uint32_t lreg_ind       = (imm >> 20) & 0xF;
+    uint32_t instr_mod0     = (imm >> 16) & 0xF;
+    uint32_t sfpu_addr_mode = (imm >> 13) & 0x7;
+    uint32_t dest_reg_addr  = imm & 0x1FFF;
+
+    if (lreg_ind >= 8) {
+        apply_addr_mod(tt, sfpu_addr_mode, tid);
+        return true;  /* VD >= 8 disables write */
+    }
+
+    /* ISA (SFPLOAD.md) address calculation:
+     *   Addr = Imm + ThreadConfig.DEST_TARGET_REG_CFG_MATH_Offset
+     *        + RWCs.Dst + ConfigState.DEST_REGW_BASE_Base
+     *   Row = (Addr & ~3) + (Lane / 8)
+     *   Column = (Lane & 7) * 2
+     *   if (Addr & 2) Column += 1         — bit[1] selects odd columns
+     */
+    uint32_t math_offset = tt->thd_reg[tid][1];
+    uint32_t addr = dest_reg_addr + math_offset + tt->dest_rwc[tid];
+    uint32_t odd_col = (addr & 2) ? 1 : 0;
+    for (int lane = 0; lane < LREG_LANES; lane++) {
+        uint32_t row = (addr & ~3) + (lane / 8);
+        uint32_t col = (lane & 7) * 2 + odd_col;
+        if (row < DEST_ROWS && col < ROW_SIZE) {
+            float val = tt->dest[row][col];
+            memcpy(&tt->lreg[lreg_ind][lane], &val, 4);
+        }
+    }
+
+    apply_addr_mod(tt, sfpu_addr_mode, tid);
+    return true;
+}
+static bool ttsfploadi(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpstore(tensix_t *tt, uint32_t imm, int tid) {
+    /* ckernel_ops.h: TT_OP_SFPSTORE(dest_reg_addr, lreg_ind, instr_mod0, sfpu_addr_mode)
+     * Encoding: lreg_ind<<20 | instr_mod0<<16 | sfpu_addr_mode<<13 | dest_reg_addr<<0
+     * Bits:     [23:20](4)    [19:16](4)       [15:13](3)           [12:0](13)
+     */
+    uint32_t lreg_ind       = (imm >> 20) & 0xF;
+    uint32_t instr_mod0     = (imm >> 16) & 0xF;
+    uint32_t sfpu_addr_mode = (imm >> 13) & 0x7;
+    uint32_t dest_reg_addr  = imm & 0x1FFF;
+
+    (void)instr_mod0; /* TODO: data format conversion */
+
+    /* ISA (SFPSTORE.md) address calculation — same as SFPLOAD:
+     *   Addr = Imm + ThreadConfig.DEST_TARGET_REG_CFG_MATH_Offset
+     *        + RWCs.Dst + ConfigState.DEST_REGW_BASE_Base
+     */
+    uint32_t math_offset = tt->thd_reg[tid][1];
+    uint32_t addr = dest_reg_addr + math_offset + tt->dest_rwc[tid];
+    uint32_t odd_col = (addr & 2) ? 1 : 0;
+    for (int lane = 0; lane < LREG_LANES; lane++) {
+        uint32_t row = (addr & ~3) + (lane / 8);
+        uint32_t col = (lane & 7) * 2 + odd_col;
+        if (row < DEST_ROWS && col < ROW_SIZE) {
+            float val;
+            memcpy(&val, &tt->lreg[lreg_ind][lane], 4);
+            tt->dest[row][col] = val;
+        }
+    }
+
+    apply_addr_mod(tt, sfpu_addr_mode, tid);
+    return true;
+}
+static bool ttsfplut(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpmuli(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpaddi(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpdivp2(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpexexp(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpexman(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpiadd(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpshft(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpsetcc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpmov(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpabs(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpand(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpor(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpnot(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfplz(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpsetexp(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpsetman(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpmad(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpadd(tensix_t *tt, uint32_t imm, int tid) {
+    uint32_t src_a = (imm >> 16) & 0xF;
+    uint32_t src_b = (imm >> 12) & 0xF;
+    uint32_t src_c = (imm >> 8)  & 0xF;
+    uint32_t dest  = (imm >> 4)  & 0xF;
+
+    if (dest >= 8) return true;  /* VD >= 8 disables write */
+
+    /* MAD: dest = src_a * src_b + src_c */
+    for (int lane = 0; lane < LREG_LANES; lane++) {
+        float a, b, c;
+        memcpy(&a, &tt->lreg[src_a][lane], 4);
+        memcpy(&b, &tt->lreg[src_b][lane], 4);
+        memcpy(&c, &tt->lreg[src_c][lane], 4);
+        float result = a * b + c;
+        memcpy(&tt->lreg[dest][lane], &result, 4);
+    }
+
+    return true;
+}
+static bool ttsfpmul(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfppushc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfppopc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpsetsgn(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpencc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpcompc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfptransp(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpxor(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfp_stoch_rnd(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpnop(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpcast(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpconfig(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpswap(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfploadmacro(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpshft2(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfplutfp32(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfple(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpgt(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfpmul24(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsfparecip(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttatgetm(tensix_t *tt, uint32_t imm, int tid) {
     uint32_t mutex_id = imm & 0x7;
     if (tt->mutex[mutex_id] == MUTEX_NONE) {
-        tt->mutex[mutex_id] = tt->thread_id;
+        tt->mutex[mutex_id] = tid;
     }
     return true;
 }
-static bool ttatrelm(tensix_t *tt, uint32_t imm) {
+static bool ttatrelm(tensix_t *tt, uint32_t imm, int tid) {
     uint32_t mutex_id = imm & 0x7;
-    if (tt->mutex[mutex_id] == tt->thread_id) {
+    if (tt->mutex[mutex_id] == tid) {
         tt->mutex[mutex_id] = MUTEX_NONE;
     }
     return true;
 }
-static bool ttstallwait(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttseminit(tensix_t *tt, uint32_t imm) {
+static bool ttstallwait(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttseminit(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_SEMINIT(max_value, init_value, sem_sel)
      * Encoding: max_value<<20 | init_value<<16 | sem_sel<<2
      *
@@ -1560,7 +1743,7 @@ static bool ttseminit(tensix_t *tt, uint32_t imm) {
 
     return true;
 }
-static bool ttsempost(tensix_t *tt, uint32_t imm) {
+static bool ttsempost(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_SEMPOST(sem_sel)
      * Encoding: sem_sel<<2
      *
@@ -1575,18 +1758,18 @@ static bool ttsempost(tensix_t *tt, uint32_t imm) {
         }
     }
     TT_DBG("[SEMPOST] core=%d mask=0x%x sem0=%d sem1=%d dest_dvalid=%d\n",
-           tt->thread_id, sem_mask, tt->sem[0], tt->sem[1], tt->dest_dvalid);
+           tid, sem_mask, tt->sem[0], tt->sem[1], tt->dest_dvalid);
 
     /* When MATH core (thread_id==1) posts a semaphore, all ELWADDs in the
      * current MOP have completed and Dest is fully populated.  Signal this
      * to the PACR wait-gate so packing can proceed.
      */
-    if (tt->thread_id == 1) {
+    if (tid == 1) {
         tt->dest_dvalid = true;
     }
     return true;
 }
-static bool ttsemget(tensix_t *tt, uint32_t imm) {
+static bool ttsemget(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_SEMGET(sem_sel)
      * Encoding: sem_sel<<2
      *
@@ -1601,10 +1784,10 @@ static bool ttsemget(tensix_t *tt, uint32_t imm) {
         }
     }
     TT_DBG("[SEMGET] core=%d mask=0x%x sem0=%d sem1=%d\n",
-           tt->thread_id, sem_mask, tt->sem[0], tt->sem[1]);
+           tid, sem_mask, tt->sem[0], tt->sem[1]);
     return true;
 }
-static bool ttsemwait(tensix_t *tt, uint32_t imm) {
+static bool ttsemwait(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_SEMWAIT(stall_res, sem_sel, wait_sem_cond)
      * Encoding: stall_res<<15 | sem_sel<<2 | wait_sem_cond<<0
      *
@@ -1615,8 +1798,8 @@ static bool ttsemwait(tensix_t *tt, uint32_t imm) {
     (void)imm;
     return true;
 }
-static bool ttstreamwait(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttwrcfg(tensix_t *tt, uint32_t imm) {
+static bool ttstreamwait(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttwrcfg(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_WRCFG(GprAddress, wr128b, CfgReg)
      * Encoding: GprAddress<<16 | wr128b<<15 | CfgReg<<0
      *
@@ -1631,7 +1814,7 @@ static bool ttwrcfg(tensix_t *tt, uint32_t imm) {
     uint32_t wr128b    = (imm >> 15) & 0x1;
     uint32_t cfg_index = imm & 0x7FFF;
 
-    uint32_t state_id = tt->cfg_state_id[tt->thread_id] & 0x1;
+    uint32_t state_id = tt->thd_reg[tid][0] & 0x1;
 
     if (wr128b) {
         /* 128-bit write: copy 4 consecutive 32-bit registers to high_mem */
@@ -1639,24 +1822,24 @@ static bool ttwrcfg(tensix_t *tt, uint32_t imm) {
         uint32_t gpr_base = gpr_addr & ~0x3U;
         for (int i = 0; i < 4; i++) {
             if ((cfg_base + i) < CFG_REG_COUNT && (gpr_base + i) < DMA_REG_COUNT) {
-                uint32_t value = tt->dma_reg[tt->thread_id][gpr_base + i];
+                uint32_t value = tt->dma_reg[tid][gpr_base + i];
                 tensix_write_cfg(&tt->mem, cfg_base + i, value);
                 TT_DBG("[WRCFG] thread=%d, cfg[%d] = 0x%x (from dma_reg[%d])\n",
-                       tt->thread_id, cfg_base + i, value, gpr_base + i);
+                       tid, cfg_base + i, value, gpr_base + i);
             }
         }
     } else {
         /* 32-bit write to high_mem */
         if (cfg_index < CFG_REG_COUNT && gpr_addr < DMA_REG_COUNT) {
-            uint32_t value = tt->dma_reg[tt->thread_id][gpr_addr];
+            uint32_t value = tt->dma_reg[tid][gpr_addr];
             tensix_write_cfg(&tt->mem, cfg_index, value);
             TT_DBG("[WRCFG] thread=%d, cfg[%d] = 0x%x (from dma_reg[%d])\n",
-                   tt->thread_id, cfg_index, value, gpr_addr);
+                   tid, cfg_index, value, gpr_addr);
         }
     }
     return true;
 }
-static bool ttrdcfg(tensix_t *tt, uint32_t imm) {
+static bool ttrdcfg(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_RDCFG(GprAddress, CfgReg)
      * Encoding: GprAddress<<16 | CfgReg<<0
      *
@@ -1669,11 +1852,11 @@ static bool ttrdcfg(tensix_t *tt, uint32_t imm) {
 
     /* Read from high_mem where config registers are stored */
     if (cfg_index < CFG_REG_COUNT && gpr_addr < DMA_REG_COUNT) {
-        tt->dma_reg[tt->thread_id][gpr_addr] = tensix_read_cfg(&tt->mem, cfg_index);
+        tt->dma_reg[tid][gpr_addr] = tensix_read_cfg(&tt->mem, cfg_index);
     }
     return true;
 }
-static bool ttsetc16(tensix_t *tt, uint32_t imm) {
+static bool ttsetc16(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_SETC16(setc16_reg, setc16_value)
      * Encoding: setc16_reg<<16 | setc16_value<<0
      *
@@ -1687,7 +1870,7 @@ static bool ttsetc16(tensix_t *tt, uint32_t imm) {
     uint32_t value     = imm & 0xFFFF;
 
     if (cfg_index < THD_REG_COUNT) {
-        tt->thd_reg[tt->thread_id][cfg_index] = value;
+        tt->thd_reg[tid][cfg_index] = value;
     }
     return true;
 }
@@ -1716,9 +1899,9 @@ static void rmwcib_common(tensix_t *tt, uint32_t imm, uint32_t byte_offset)
     uint8_t old_byte = cfg_bytes[byte_offset];
     cfg_bytes[byte_offset] = (new_value & mask) | (old_byte & ~mask);
 }
-static bool ttrmwcib0(tensix_t *tt, uint32_t imm) { rmwcib_common(tt, imm, 0); return true; }
-static bool ttrmwcib1(tensix_t *tt, uint32_t imm) { rmwcib_common(tt, imm, 1); return true; }
-static bool ttrmwcib2(tensix_t *tt, uint32_t imm) { rmwcib_common(tt, imm, 2); return true; }
-static bool ttrmwcib3(tensix_t *tt, uint32_t imm) { rmwcib_common(tt, imm, 3); return true; }
-static bool ttstreamwrcfg(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
-static bool ttcfgshiftmask(tensix_t *tt, uint32_t imm) { (void)tt; (void)imm; return true; }
+static bool ttrmwcib0(tensix_t *tt, uint32_t imm, int tid) { rmwcib_common(tt, imm, 0); return true; }
+static bool ttrmwcib1(tensix_t *tt, uint32_t imm, int tid) { rmwcib_common(tt, imm, 1); return true; }
+static bool ttrmwcib2(tensix_t *tt, uint32_t imm, int tid) { rmwcib_common(tt, imm, 2); return true; }
+static bool ttrmwcib3(tensix_t *tt, uint32_t imm, int tid) { rmwcib_common(tt, imm, 3); return true; }
+static bool ttstreamwrcfg(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttcfgshiftmask(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
