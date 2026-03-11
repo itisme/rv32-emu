@@ -500,7 +500,8 @@ static bool ttelwadd(tensix_t *tt, uint32_t imm, int tid) {
     /* Determine row indices */
     uint32_t srca_row = tt->srca_rwc[tid] & 0x38;
     uint32_t srcb_row = tt->srcb_rwc[tid] & (bcast_srcb_row ? 0x3F : 0x38);
-    uint32_t dest_base = (dst_row + tt->dest_rwc[tid] + tt->dest_offset) & 0x3F8;
+    uint32_t math_offset = tt->thd_reg[tid][1];
+    uint32_t dest_base = (dst_row + tt->dest_rwc[tid] + math_offset) & 0x3F8;
 
     /* Element-wise add: 8 rows x 16 columns */
     TT_DBG("[ELWADD] srca_row=%d, srcb_row=%d, dest_base=%d, srca_dvalid=%d, srcb_dvalid=%d\n",
@@ -869,7 +870,7 @@ static bool ttpacr(tensix_t *tt, uint32_t imm, int tid) {
 
     /* Input format for datum size computation - read from high_mem */
     uint32_t in_data_fmt = (tensix_read_cfg(&tt->mem, 70) >> 8) & 0xF;
-    uint32_t out_data_fmt = tensix_read_cfg(&tt->mem, 70) & 0xF;
+    uint32_t out_data_fmt = (tensix_read_cfg(&tt->mem, 70) >> 4) & 0xF;
     uint32_t out_dsb = get_datum_size(out_data_fmt);
 
     /* Bytes per datum from In_data_format (for Dest address computation) */
@@ -982,7 +983,7 @@ static bool ttpacr(tensix_t *tt, uint32_t imm, int tid) {
                     val = tt->dest[d_row][d_col];
                 }
 
-                uint32_t raw = float_to_datum(val, in_data_fmt);
+                uint32_t raw = float_to_datum(val, out_data_fmt);
                 uint32_t l1_off = l1_byte_addr + l1_idx * out_dsb;
                 if (l1_off + out_dsb <= 0x180000) {
                     memcpy(tt->mem.l1_scratchpad + l1_off, &raw, out_dsb);
