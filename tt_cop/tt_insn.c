@@ -1618,7 +1618,43 @@ static bool sfpload(tensix_t *tt, uint32_t imm, int tid) {
     apply_addr_mod(tt, sfpu_addr_mode, tid);
     return true;
 }
-static bool sfploadi(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfploadi(tensix_t *tt, uint32_t imm, int tid) {
+    /* Encoding: VD<<20 | Mod0<<16 | Imm16<<0
+     * Loads a 16-bit immediate into LReg[VD] for all lanes, with format conversion.
+     */
+    (void)tid;
+    uint32_t vd    = (imm >> 20) & 0xF;
+    uint32_t mod0  = (imm >> 16) & 0xF;
+    uint32_t imm16 = imm & 0xFFFF;
+
+    if (vd >= 8) return true; /* VD 0-7 only */
+
+    for (int lane = 0; lane < LREG_LANES; lane++) {
+        uint32_t result;
+        switch (mod0) {
+        case 0: /* FLOATB (BF16→FP32): shift left 16 */
+            result = imm16 << 16;
+            break;
+        case 2: /* USHORT (UINT16→UINT32): zero extend */
+            result = imm16;
+            break;
+        case 4: /* SHORT (INT16→INT32): sign extend */
+            result = (uint32_t)(int32_t)(int16_t)imm16;
+            break;
+        case 8: /* UPPER: write upper 16 bits, preserve lower */
+            result = (imm16 << 16) | (tt->lreg[vd][lane] & 0xFFFF);
+            break;
+        case 10: /* LOWER: write lower 16 bits, preserve upper */
+            result = (tt->lreg[vd][lane] & 0xFFFF0000) | imm16;
+            break;
+        default: /* FLOATA (FP16→FP32) and others: BF16 as fallback */
+            result = imm16 << 16;
+            break;
+        }
+        tt->lreg[vd][lane] = result;
+    }
+    return true;
+}
 static bool sfpstore(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_SFPSTORE(dest_reg_addr, lreg_ind, instr_mod0, sfpu_addr_mode)
      * Encoding: lreg_ind<<20 | instr_mod0<<16 | sfpu_addr_mode<<13 | dest_reg_addr<<0
@@ -1701,10 +1737,102 @@ static bool sfpaddi(tensix_t *tt, uint32_t imm, int tid) {
     return true;
 }
 static bool sfpdivp2(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool sfpexexp(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool sfpexman(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpexexp(tensix_t *tt, uint32_t imm, int tid) {
+    /* Encoding: Imm12<<12 | VC<<8 | VD<<4 | Mod1
+     * Extract FP32 exponent from VC, write as signed int to VD.
+     * Mod1 bit0: 0=debias (subtract 127), 1=no debias (raw exponent)
+     */
+    (void)tid;
+    uint32_t vc   = (imm >> 8) & 0xF;
+    uint32_t vd   = (imm >> 4) & 0xF;
+    uint32_t mod1 = imm & 0xF;
+
+    if (vd >= 8 && vd != 16) return true;
+
+    for (int lane = 0; lane < LREG_LANES; lane++) {
+        if (tt->use_lane_flags[lane] && !tt->lane_flags[lane]) continue;
+        uint32_t val = tt->lreg[vc][lane];
+        int32_t exp = (val >> 23) & 0xFF;
+        if (!(mod1 & 1)) exp -= 127; /* debias */
+        uint32_t result;
+        memcpy(&result, &exp, 4);
+        if (vd < 8 || vd == 16)
+            tt->lreg[vd][lane] = result;
+    }
+    return true;
+}
+static bool sfpexman(tensix_t *tt, uint32_t imm, int tid) {
+    /* Encoding: Imm12<<12 | VC<<8 | VD<<4 | Mod1
+     * Extract FP32 mantissa from VC.
+     * Mod1 bit0: 0=add hidden bit (bit23), 1=raw mantissa only
+     */
+    (void)tid;
+    uint32_t vc   = (imm >> 8) & 0xF;
+    uint32_t vd   = (imm >> 4) & 0xF;
+    uint32_t mod1 = imm & 0xF;
+
+    if (vd >= 8 && vd != 16) return true;
+
+    for (int lane = 0; lane < LREG_LANES; lane++) {
+        if (tt->use_lane_flags[lane] && !tt->lane_flags[lane]) continue;
+        uint32_t val = tt->lreg[vc][lane];
+        uint32_t mantissa = val & 0x7FFFFF;
+        if (!(mod1 & 1)) mantissa |= (1u << 23); /* add hidden bit */
+        if (vd < 8 || vd == 16)
+            tt->lreg[vd][lane] = mantissa;
+    }
+    return true;
+}
 static bool sfpiadd(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool sfpshft(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpshft(tensix_t *tt, uint32_t imm, int tid) {
+    /* Encoding: Imm12<<12 | VC<<8 | VD<<4 | Mod1
+     * Bitwise shift. Positive=left, negative=right.
+     * Mod1 bit0: 1=use Imm12 as shift amount, 0=use VC
+     * Mod1 bit1: 1=arithmetic right shift, 0=logical
+     */
+    (void)tid;
+    uint32_t imm12 = (imm >> 12) & 0xFFF;
+    uint32_t vc    = (imm >> 8) & 0xF;
+    uint32_t vd    = (imm >> 4) & 0xF;
+    uint32_t mod1  = imm & 0xF;
+
+    if (vd >= 8 && vd != 16) return true;
+
+    for (int lane = 0; lane < LREG_LANES; lane++) {
+        if (tt->use_lane_flags[lane] && !tt->lane_flags[lane]) continue;
+
+        /* Value to shift: VD (default) or VC if mod1 bit2 set and using imm */
+        uint32_t val = tt->lreg[vd][lane];
+        if ((mod1 & 1) && (mod1 & 4)) val = tt->lreg[vc][lane];
+
+        /* Shift amount */
+        int32_t shift;
+        if (mod1 & 1) {
+            /* Imm12 as signed 12-bit */
+            shift = (int32_t)((imm12 & 0x800) ? (imm12 | 0xFFFFF000) : imm12);
+        } else {
+            int32_t vc_val;
+            memcpy(&vc_val, &tt->lreg[vc][lane], 4);
+            shift = vc_val;
+        }
+
+        uint32_t result;
+        if (shift >= 0) {
+            uint32_t s = shift & 31;
+            result = val << s;
+        } else {
+            uint32_t s = (-shift) & 31;
+            if (mod1 & 2) /* arithmetic */
+                result = (uint32_t)((int32_t)val >> s);
+            else /* logical */
+                result = val >> s;
+        }
+
+        if (vd < 8 || vd == 16)
+            tt->lreg[vd][lane] = result;
+    }
+    return true;
+}
 static bool sfpsetcc(tensix_t *tt, uint32_t imm, int tid) {
     /* Encoding: imm12<<12 | VC<<8 | VD<<4 | Mod1
      * imm1 = bit0 of imm12 (Imm1 in ISA) */
@@ -1779,7 +1907,45 @@ static bool sfpand(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (
 static bool sfpor(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool sfpnot(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool sfplz(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool sfpsetexp(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpsetexp(tensix_t *tt, uint32_t imm, int tid) {
+    /* Encoding: Imm12<<12 | VC<<8 | VD<<4 | Mod1
+     * Set FP32 exponent: combine exponent (from Imm or VD) with sign+mantissa from VC.
+     * Mod1 bit0: 1=use Imm12[11:4] as exponent, 0=use VD
+     * Mod1 bit1: (when bit0=0) 1=use FP32 exp bits from VD, 0=use low 8 bits of VD
+     */
+    (void)tid;
+    uint32_t imm12 = (imm >> 12) & 0xFFF;
+    uint32_t vc    = (imm >> 8) & 0xF;
+    uint32_t vd    = (imm >> 4) & 0xF;
+    uint32_t mod1  = imm & 0xF;
+
+    if (vd >= 8 && vd != 16) return true;
+
+    for (int lane = 0; lane < LREG_LANES; lane++) {
+        if (tt->use_lane_flags[lane] && !tt->lane_flags[lane]) continue;
+
+        uint32_t c_val = tt->lreg[vc][lane];
+        uint32_t sign = c_val & 0x80000000;
+        uint32_t mantissa = c_val & 0x7FFFFF;
+
+        uint32_t exp;
+        if (mod1 & 1) {
+            /* Use upper 8 bits of Imm12 */
+            exp = (imm12 >> 4) & 0xFF;
+        } else if (mod1 & 2) {
+            /* Use FP32 exponent field from VD */
+            exp = (tt->lreg[vd][lane] >> 23) & 0xFF;
+        } else {
+            /* Use low 8 bits of VD as integer */
+            exp = tt->lreg[vd][lane] & 0xFF;
+        }
+
+        uint32_t result = sign | (exp << 23) | mantissa;
+        if (vd < 8 || vd == 16)
+            tt->lreg[vd][lane] = result;
+    }
+    return true;
+}
 static bool sfpsetman(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 /* Common MAD implementation for SFPMAD, SFPADD, SFPMUL
  * Encoding: VA<<16 | VB<<12 | VC<<8 | VD<<4 | Mod1
@@ -1886,11 +2052,178 @@ static bool sfpcompc(tensix_t *tt, uint32_t imm, int tid) {
 }
 static bool sfptransp(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool sfpxor(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool sfp_stoch_rnd(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfp_stoch_rnd(tensix_t *tt, uint32_t imm, int tid) {
+    /* Encoding: rnd_mode<<21 | imm8<<16 | VB<<12 | VC<<8 | VD<<4 | Mod1
+     * Mode A: Reduce FP32 mantissa precision
+     *   Mod1=0: FP16A (keep 10 bits), Mod1=1: FP16B (keep 7 bits, BF16)
+     * Mode B: FP32 → integer (Mod1=2,3,6,7)
+     * Mode C: Descale integer (Mod1=4,5)
+     * Normalizations: denormals→0, -0→+0, -NaN→-Inf, +NaN→+Inf
+     */
+    (void)tid;
+    uint32_t rnd_mode = (imm >> 21) & 0x7;
+    uint32_t vb   = (imm >> 12) & 0xF;
+    uint32_t vc   = (imm >> 8) & 0xF;
+    uint32_t vd   = (imm >> 4) & 0xF;
+    uint32_t mod1 = imm & 0xF;
+
+    (void)rnd_mode; (void)vb;
+
+    if (vd >= 8 && vd != 16) return true;
+
+    for (int lane = 0; lane < LREG_LANES; lane++) {
+        if (tt->use_lane_flags[lane] && !tt->lane_flags[lane]) continue;
+
+        uint32_t val = tt->lreg[vc][lane];
+        uint32_t result;
+
+        if (mod1 <= 1) {
+            /* Mode A: Reduce mantissa precision */
+            uint32_t sign = val & 0x80000000;
+            uint32_t exp  = (val >> 23) & 0xFF;
+            uint32_t man  = val & 0x7FFFFF;
+
+            /* Normalize special values */
+            if (exp == 0) {
+                /* Denormal → +0 */
+                result = 0;
+            } else if (exp == 0xFF) {
+                /* NaN/Inf normalization */
+                if (man != 0) {
+                    /* NaN → ±Inf */
+                    result = sign | 0x7F800000;
+                } else {
+                    result = val; /* Inf stays */
+                }
+            } else {
+                uint32_t discard_bits = (mod1 == 1) ? 16 : 13;
+                uint32_t mask = ~((1u << discard_bits) - 1);
+                /* Round to nearest (rnd_mode 0): add half of discarded range */
+                uint32_t round_bit = 1u << (discard_bits - 1);
+                man = (man + round_bit) & 0x7FFFFF;
+                man &= mask;
+                result = sign | (exp << 23) | man;
+            }
+        } else {
+            /* Mode B/C: integer conversion — simplified passthrough */
+            result = val;
+        }
+
+        if (vd < 8 || vd == 16)
+            tt->lreg[vd][lane] = result;
+    }
+    return true;
+}
 static bool sfpnop(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool sfpcast(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool sfpconfig(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool sfpswap(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool sfpcast(tensix_t *tt, uint32_t imm, int tid) {
+    /* Encoding: VC<<8 | VD<<4 | Mod1
+     * Mode A (Mod1=0,1): Sign-magnitude int32 → FP32
+     * Mode B (Mod1=3): Two's complement ↔ sign-magnitude
+     * Mode C (Mod1=2): Two's complement absolute value
+     */
+    (void)tid;
+    uint32_t vc   = (imm >> 8) & 0xF;
+    uint32_t vd   = (imm >> 4) & 0xF;
+    uint32_t mod1 = imm & 0xF;
+
+    if (vd >= 8 && vd != 16) return true;
+
+    for (int lane = 0; lane < LREG_LANES; lane++) {
+        if (tt->use_lane_flags[lane] && !tt->lane_flags[lane]) continue;
+
+        uint32_t c_val = tt->lreg[vc][lane];
+        uint32_t result;
+
+        if (mod1 == 3) {
+            /* Two's complement ↔ sign-magnitude */
+            uint32_t sign = c_val & 0x80000000;
+            if (sign)
+                result = sign | (uint32_t)(-(int32_t)c_val);
+            else
+                result = c_val;
+        } else if (mod1 == 2) {
+            /* Absolute value of two's complement */
+            int32_t s;
+            memcpy(&s, &c_val, 4);
+            result = (uint32_t)(s < 0 ? -s : s);
+        } else {
+            /* Sign-magnitude int32 → FP32 */
+            uint32_t sign = c_val & 0x80000000;
+            uint32_t magnitude = c_val & 0x7FFFFFFF;
+            float fval = (float)magnitude;
+            memcpy(&result, &fval, 4);
+            result = (result & 0x7FFFFFFF) | sign;
+        }
+
+        if (vd < 8 || vd == 16)
+            tt->lreg[vd][lane] = result;
+    }
+    return true;
+}
+static bool sfpconfig(tensix_t *tt, uint32_t imm, int tid) {
+    /* Encoding: Imm16<<8 | VD<<4 | Mod1
+     * VD=11-14: Write LReg[VD] from LReg[0] (mod1 bit0=0) or Imm16 (mod1 bit0=1)
+     * VD=15: Write/manipulate LaneConfig
+     */
+    (void)tid;
+    uint32_t imm16 = (imm >> 8) & 0xFFFF;
+    uint32_t vd    = (imm >> 4) & 0xF;
+    uint32_t mod1  = imm & 0xF;
+
+    if (vd >= 11 && vd <= 14) {
+        /* Write to LReg[11-14] */
+        for (int lane = 0; lane < LREG_LANES; lane++) {
+            if (mod1 & 1) {
+                /* Use Imm16 (BF16→FP32) */
+                tt->lreg[vd][lane] = imm16 << 16;
+            } else {
+                /* Use LReg[0] (cross-lane: take from lane 0..7 pattern) */
+                tt->lreg[vd][lane] = tt->lreg[0][lane & 7];
+            }
+        }
+    } else if (vd == 15) {
+        /* LaneConfig manipulation — simplified: just store the value */
+        /* This controls ROW_MASK and other lane configuration bits */
+    }
+    /* VD 0-10: LoadMacroConfig and other special config — not needed for exp() */
+    return true;
+}
+static bool sfpswap(tensix_t *tt, uint32_t imm, int tid) {
+    /* Encoding: Imm12<<12 | VC<<8 | VD<<4 | Mod1
+     * Mod1=0: Unconditional swap VD ↔ VC
+     * Mod1=1: All lanes: VD=min(VD,VC), VC=max(VD,VC)
+     * Other modes: subvector modes (not needed for exp())
+     */
+    (void)tid;
+    uint32_t vc   = (imm >> 8) & 0xF;
+    uint32_t vd   = (imm >> 4) & 0xF;
+    uint32_t mod1 = imm & 0xF;
+
+    if (vd >= 8 && vd != 16) return true;
+
+    for (int lane = 0; lane < LREG_LANES; lane++) {
+        if (tt->use_lane_flags[lane] && !tt->lane_flags[lane]) continue;
+
+        uint32_t d_bits = tt->lreg[vd][lane];
+        uint32_t c_bits = tt->lreg[vc][lane];
+
+        if (mod1 == 0) {
+            /* Unconditional swap */
+            if (vd < 8 || vd == 16) tt->lreg[vd][lane] = c_bits;
+            if (vc < 8 || vc == 16) tt->lreg[vc][lane] = d_bits;
+        } else if (mod1 == 1) {
+            /* Min/Max: VD=min, VC=max */
+            float d_f, c_f;
+            memcpy(&d_f, &d_bits, 4);
+            memcpy(&c_f, &c_bits, 4);
+            if (d_f > c_f) {
+                if (vd < 8 || vd == 16) tt->lreg[vd][lane] = c_bits;
+                if (vc < 8 || vc == 16) tt->lreg[vc][lane] = d_bits;
+            }
+        }
+    }
+    return true;
+}
 static bool sfploadmacro(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool sfpshft2(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool sfplutfp32(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
