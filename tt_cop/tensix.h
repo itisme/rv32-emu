@@ -85,8 +85,9 @@ extern int tt_log_level;
 #define MUTEX_NONE 0xff
 
 #define THD_REG_COUNT 57
-/* Blackhole: CFG_STATE_SIZE=56, Config[2][56*4], so 224 regs per state */
-#define CFG_REG_COUNT (56 * 4)
+/* Blackhole: CFG_STATE_SIZE=56, Config[2][56*4], so 224 regs per state, 448 total */
+#define CFG_STATE_REGS (56 * 4)
+#define CFG_REG_COUNT  (CFG_STATE_REGS * 2)
 
 /* TENSIX_CFG_BASE offset in high_mem
  * high_mem starts at 0xFFB00000 (with local_size offset handled by rv32emu)
@@ -399,10 +400,18 @@ struct tensix {
     MopTemplate0 mop_templ_0;
     MopTemplate1 mop_templ_1;
     uint32_t log2_replay_buffer_depth;
-    TemplateOp replay_buffer[16];
-    uint32_t replay_index;
-    uint32_t replay_left;
-    bool replay_execute_while_loading;
+    uint32_t replay_buffer[32];    /* 32 instruction words, per-thread replay */
+    uint32_t replay_index;         /* Current recording position */
+    uint32_t replay_left;          /* Instructions remaining to record */
+    bool replay_execute_while_loading; /* Execute while recording */
+    bool replay_recording;         /* True when recording mode active */
+    int replay_recording_tid;      /* Thread ID doing the recording */
+
+    /* Replay expansion state (replaying with proper dvalid checks) */
+    bool replay_expanding[3];         /* Per-thread: true when replay expansion is active */
+    uint32_t replay_expand_start[3];  /* Per-thread: start index in replay buffer */
+    uint32_t replay_expand_count[3];  /* Per-thread: total instructions to replay */
+    uint32_t replay_expand_current[3];/* Per-thread: current replay position */
 
 };
 

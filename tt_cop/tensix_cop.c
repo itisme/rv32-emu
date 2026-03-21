@@ -1133,8 +1133,9 @@ void tensix_cop_set_direct(tensix_cop_t *cop, int core_id, uint32_t insn)
  * Returns: true = instruction completed, PC should advance
  *          false = blocked by Wait Gate, PC should not advance
  */
-/* Forward declaration: MOP continuation is defined after the MOP expander */
+/* Forward declarations: defined after the MOP expander */
 static bool mop_continue_execution(tensix_cop_t *cop, int core_id);
+static bool drain_replay_expansion(tensix_cop_t *cop, int core_id);
 
 bool tensix_cop_step_direct(tensix_cop_t *cop, int core_id)
 {
@@ -1152,7 +1153,31 @@ bool tensix_cop_step_direct(tensix_cop_t *cop, int core_id)
 
     /* --- MOP continuation: generate and execute expanded instructions one by one --- */
     if (thread->mop_state.active) {
-        return mop_continue_execution(cop, core_id);
+        /* Save the direct instruction: the MOP might have been triggered by a
+         * FIFO write (memory-mapped MOP), not by this direct instruction.
+         * mop_continue_execution clears has_direct_insn when MOP completes,
+         * which would lose the actual pending direct instruction. */
+        uint32_t saved_direct = thread->direct_insn;
+        bool result = mop_continue_execution(cop, core_id);
+        if (result) {
+            /* MOP completed.  If the direct instruction was NOT a MOP itself
+             * (i.e., it was a different instruction that arrived while a
+             * FIFO-originated MOP was still expanding), restore it so it
+             * gets executed on the next step_direct call. */
+            uint32_t saved_op = tensix_insn_opcode(saved_direct);
+            if (saved_op != 0x01) {  /* 0x01 = MOP opcode */
+                thread->direct_insn = saved_direct;
+                thread->has_direct_insn = true;
+                /* Don't return — fall through to process the direct instruction */
+            } else {
+                return true;
+            }
+        } else {
+            /* MOP blocked; restore direct instruction for retry */
+            thread->direct_insn = saved_direct;
+            thread->has_direct_insn = true;
+            return false;
+        }
     }
 
     /* Drain pending FIFO instructions before executing the direct instruction.
@@ -1165,12 +1190,47 @@ bool tensix_cop_step_direct(tensix_cop_t *cop, int core_id)
     while (tensix_cop_step(cop, core_id))
         ;
 
+    /* If FIFO drain activated a MOP (from memory-mapped MOP write),
+     * complete it before processing the pending direct instruction. */
+    if (thread->mop_state.active) {
+        uint32_t saved_direct = thread->direct_insn;
+        while (thread->mop_state.active) {
+            if (!mop_continue_execution(cop, core_id)) {
+                thread->direct_insn = saved_direct;
+                thread->has_direct_insn = true;
+                return false;
+            }
+        }
+        /* MOP completed; restore the actual direct instruction */
+        thread->direct_insn = saved_direct;
+        thread->has_direct_insn = true;
+    }
+
     uint32_t insn = thread->direct_insn;
     uint32_t opcode = tensix_insn_opcode(insn);
 
     /* MOP_CFG bypasses Wait Gate (handled by MOP Expander) */
     if (opcode == 0x03) {  /* MOP_CFG */
         thread->zmask_hi16 = insn & 0x00FFFFFF;
+        thread->has_direct_insn = false;
+        thread->state = THREAD_STATE_RUNNING;
+        thread->insn_executed++;
+        return true;
+    }
+
+    /* Replay recording mode: intercept instructions and store in replay buffer */
+    if (cop->core->replay_recording && core_id == cop->core->replay_recording_tid) {
+        uint32_t buf_idx = cop->core->replay_index & 31;
+        cop->core->replay_buffer[buf_idx] = insn;
+        cop->core->replay_index++;
+        cop->core->replay_left--;
+        if (cop->core->replay_left == 0) {
+            cop->core->replay_recording = false;
+        }
+        if (cop->core->replay_execute_while_loading) {
+            /* Execute the instruction normally as well */
+            tensix_cop_execute_insn(cop, core_id, insn);
+        }
         thread->has_direct_insn = false;
         thread->state = THREAD_STATE_RUNNING;
         thread->insn_executed++;
@@ -1248,6 +1308,12 @@ bool tensix_cop_step_direct(tensix_cop_t *cop, int core_id)
     if (opcode == 0x01) {
         /* mop_state was initialized by ttmop -> tensix_cop_mop_expand */
         return mop_continue_execution(cop, core_id);
+    }
+
+    /* --- REPLAY special handling: ttreplay set up replay expansion --- */
+    if (cop->core->replay_expanding[core_id]) {
+        if (!drain_replay_expansion(cop, core_id))
+            return false;  /* Blocked; keep has_direct_insn = true */
     }
 
     thread->has_direct_insn = false;
@@ -1450,6 +1516,40 @@ static bool mop_generate_next(tensix_cop_t *cop, int core_id,
         return mop_generate_next_t1(cop, core_id, out_insn);
 }
 
+/* Drain active replay expansion.
+ * Executes replayed instructions one at a time through tensix_cop_step(),
+ * which provides full wait gate and dvalid auto-wait support.
+ * Returns true when all replay instructions are done, false if blocked. */
+static bool drain_replay_expansion(tensix_cop_t *cop, int core_id)
+{
+    tensix_thread_cop_t *thread = &cop->threads[core_id];
+    tensix_t *core = cop->core;
+
+    while (core->replay_expanding[core_id]) {
+        /* Retry any pending instruction from previous block */
+        if (thread->has_current_insn) {
+            if (!tensix_cop_step(cop, core_id)) {
+                return false;  /* Still blocked */
+            }
+        }
+
+        if (core->replay_expand_current[core_id] >= core->replay_expand_count[core_id]) {
+            core->replay_expanding[core_id] = false;
+            return true;
+        }
+
+        uint32_t buf_idx = (core->replay_expand_start[core_id] + core->replay_expand_current[core_id]) & 31;
+        uint32_t insn = core->replay_buffer[buf_idx];
+        core->replay_expand_current[core_id]++;
+        thread->current_insn = insn;
+        thread->has_current_insn = true;
+        if (!tensix_cop_step(cop, core_id)) {
+            return false;  /* Blocked; instruction saved in has_current_insn */
+        }
+    }
+    return true;
+}
+
 /* Continue executing MOP-expanded instructions one at a time.
  * Each instruction is passed to tensix_cop_step via has_current_insn,
  * which handles wait gate, dvalid checks, and execution.
@@ -1458,10 +1558,21 @@ static bool mop_continue_execution(tensix_cop_t *cop, int core_id)
 {
     tensix_thread_cop_t *thread = &cop->threads[core_id];
 
+    /* Drain any active replay expansion first (from previous block) */
+    if (cop->core->replay_expanding[core_id]) {
+        if (!drain_replay_expansion(cop, core_id))
+            return false;
+    }
+
     /* If there's a pending instruction from last attempt, retry it */
     if (thread->has_current_insn) {
         if (!tensix_cop_step(cop, core_id)) {
             return false;  /* Still blocked */
+        }
+        /* After executing, check for new replay expansion */
+        if (cop->core->replay_expanding[core_id]) {
+            if (!drain_replay_expansion(cop, core_id))
+                return false;
         }
     }
 
@@ -1473,6 +1584,12 @@ static bool mop_continue_execution(tensix_cop_t *cop, int core_id)
         thread->has_current_insn = true;
         if (!tensix_cop_step(cop, core_id)) {
             return false;  /* Blocked; instruction saved in has_current_insn */
+        }
+        /* After executing, check for new replay expansion
+         * (MOP may expand to REPLAY instructions that trigger replay) */
+        if (cop->core->replay_expanding[core_id]) {
+            if (!drain_replay_expansion(cop, core_id))
+                return false;
         }
     }
 

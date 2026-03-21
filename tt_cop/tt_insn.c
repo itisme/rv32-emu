@@ -210,25 +210,46 @@ static void apply_addr_mod(tensix_t *tt, uint32_t mod_idx, int tid)
     uint32_t ab_reg  = tt->thd_reg[tid][12 + mod_idx];
     uint32_t dst_reg = tt->thd_reg[tid][28 + mod_idx];
 
-    /* SrcA: increment, then handle clr/cr */
+    /* SrcA: ISA uses mutually exclusive if/else if/else:
+     *   if (Clear)  SrcA = 0, SrcA_Cr = 0
+     *   else if (CR) SrcA_Cr += Incr, SrcA = SrcA_Cr
+     *   else         SrcA += Incr
+     */
     uint32_t srca_incr = ab_reg & 0x3F;
     uint32_t srca_cr   = (ab_reg >> 6) & 1;
     uint32_t srca_clr  = (ab_reg >> 7) & 1;
 
-    tt->srca_rwc[tid] += srca_incr;
-    if (srca_clr) tt->srca_rwc[tid] = 0;
-    if (srca_cr)  tt->srca_rwc[tid] = tt->srca_rwc_cr[tid];
+    if (srca_clr) {
+        tt->srca_rwc[tid] = 0;
+        tt->srca_rwc_cr[tid] = 0;
+    } else if (srca_cr) {
+        tt->srca_rwc_cr[tid] += srca_incr;
+        tt->srca_rwc[tid] = tt->srca_rwc_cr[tid];
+    } else {
+        tt->srca_rwc[tid] += srca_incr;
+    }
 
-    /* SrcB */
+    /* SrcB: same mutually exclusive logic */
     uint32_t srcb_incr = (ab_reg >> 8) & 0x3F;
     uint32_t srcb_cr   = (ab_reg >> 14) & 1;
     uint32_t srcb_clr  = (ab_reg >> 15) & 1;
 
-    tt->srcb_rwc[tid] += srcb_incr;
-    if (srcb_clr) tt->srcb_rwc[tid] = 0;
-    if (srcb_cr)  tt->srcb_rwc[tid] = tt->srcb_rwc_cr[tid];
+    if (srcb_clr) {
+        tt->srcb_rwc[tid] = 0;
+        tt->srcb_rwc_cr[tid] = 0;
+    } else if (srcb_cr) {
+        tt->srcb_rwc_cr[tid] += srcb_incr;
+        tt->srcb_rwc[tid] = tt->srcb_rwc_cr[tid];
+    } else {
+        tt->srcb_rwc[tid] += srcb_incr;
+    }
 
-    /* Dest: increment, snapshot to Cr if c_to_cr, then handle clr/cr */
+    /* Dest: ISA uses mutually exclusive if/else if/else if/else:
+     *   if (Clear)  Dst = 0, Dst_Cr = 0
+     *   else if (CtoCR) Dst += Incr, Dst_Cr = Dst
+     *   else if (CR)    Dst_Cr += Incr, Dst = Dst_Cr
+     *   else            Dst += Incr
+     */
     uint32_t dest_incr   = dst_reg & 0x3FF;
     uint32_t dest_cr     = (dst_reg >> 10) & 1;
     uint32_t dest_clr    = (dst_reg >> 11) & 1;
@@ -236,14 +257,25 @@ static void apply_addr_mod(tensix_t *tt, uint32_t mod_idx, int tid)
     uint32_t fid_incr    = (dst_reg >> 13) & 0x3;
     uint32_t fid_clr     = (dst_reg >> 15) & 1;
 
-    tt->dest_rwc[tid] += dest_incr;
-    if (dest_c2cr) tt->dest_rwc_cr[tid] = tt->dest_rwc[tid];
-    if (dest_clr) tt->dest_rwc[tid] = 0;
-    if (dest_cr)  tt->dest_rwc[tid] = tt->dest_rwc_cr[tid];
+    if (dest_clr) {
+        tt->dest_rwc[tid] = 0;
+        tt->dest_rwc_cr[tid] = 0;
+    } else if (dest_c2cr) {
+        tt->dest_rwc[tid] += dest_incr;
+        tt->dest_rwc_cr[tid] = tt->dest_rwc[tid];
+    } else if (dest_cr) {
+        tt->dest_rwc_cr[tid] += dest_incr;
+        tt->dest_rwc[tid] = tt->dest_rwc_cr[tid];
+    } else {
+        tt->dest_rwc[tid] += dest_incr;
+    }
 
     /* Fidelity */
-    tt->fidelity[tid] += fid_incr;
-    if (fid_clr) tt->fidelity[tid] = 0;
+    if (fid_clr) {
+        tt->fidelity[tid] = 0;
+    } else {
+        tt->fidelity[tid] += fid_incr;
+    }
 }
 
 /*
@@ -298,7 +330,45 @@ static bool ttmop(tensix_t *tt, uint32_t imm, int tid) {
     tensix_cop_mop_expand(tt->cop, thread_id, imm);
     return true;
 }
-static bool ttreplay(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttreplay(tensix_t *tt, uint32_t imm, int tid) {
+    /* ckernel_ops.h: TT_OP_REPLAY(start_idx, len, execute_while_loading, load_mode)
+     * Encoding: start_idx<<14 | len<<4 | execute_while_loading<<1 | load_mode<<0
+     *
+     * ISA (REPLAY.md):
+     *   Load=1: Record next Count instructions into replay buffer
+     *   Load=0: Replay Count instructions from replay buffer
+     */
+    uint32_t start_idx = (imm >> 14) & 0x1F;
+    uint32_t count     = (imm >> 4) & 0x3FF;
+    uint32_t exec      = (imm >> 1) & 0x1;
+    uint32_t load      = imm & 0x1;
+
+    if (count == 0) count = 64; /* Count=0 means 64 */
+
+    if (load) {
+        /* Recording mode: set state so tensix_cop_step_direct will record */
+        tt->replay_index = start_idx;
+        tt->replay_left = count;
+        tt->replay_execute_while_loading = (exec != 0);
+        tt->replay_recording = true;
+        tt->replay_recording_tid = tid;
+    } else {
+        /* Replay mode: set up expansion state for proper dvalid checking.
+         * The actual replay is handled by drain_replay_expansion() in
+         * tensix_cop.c, which executes each replayed instruction through
+         * tensix_cop_step() with full wait gate and dvalid auto-wait.
+         *
+         * Previously this called tensix_execute_insn() directly in a loop,
+         * bypassing dvalid checks — causing T1 (math) to execute MVMUL
+         * before T0 (unpack) had set srca_dvalid/srcb_dvalid.
+         */
+        tt->replay_expanding[tid] = true;
+        tt->replay_expand_start[tid] = start_idx;
+        tt->replay_expand_count[tid] = count;
+        tt->replay_expand_current[tid] = 0;
+    }
+    return true;
+}
 static bool ttresourcedecl(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool ttmovd2a(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool ttmovdbga2d(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
@@ -460,7 +530,77 @@ static bool ttconv3s1(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm
 static bool ttconv3s2(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool ttmpool3s1(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool ttapool3s1(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttmvmul(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttmvmul(tensix_t *tt, uint32_t imm, int tid) {
+    /* ckernel_ops.h: TT_OP_MVMUL(clear_dvalid, instr_mod19, addr_mode, dst)
+     * Encoding: clear_dvalid<<22 | instr_mod19<<19 | addr_mode<<14 | dst<<0
+     *
+     * ISA (MVMUL.md):
+     *   Dst += SrcB[8x16] @ SrcA[16x16]  (matrix multiply accumulate)
+     *   clear_dvalid: bit0=FlipSrcA, bit1=FlipSrcB
+     *   instr_mod19 bit0: BroadcastSrcBRow
+     *   addr_mode[4:0]: AddrMod index
+     */
+    uint32_t clear_dvalid  = (imm >> 22) & 0x3;
+    uint32_t instr_mod19   = (imm >> 19) & 0x7;
+    uint32_t addr_mode     = (imm >> 14) & 0x1F;
+    uint32_t dst_row       = imm & 0x3FFF;
+
+    bool flip_srca       = clear_dvalid & 0x1;
+    bool flip_srcb       = (clear_dvalid >> 1) & 0x1;
+    bool bcast_srcb_row  = instr_mod19 & 0x1;
+
+    /* Row calculations */
+    unsigned num_rows = bcast_srcb_row ? 7 : 8;
+    uint32_t srca_row = tt->srca_rwc[tid] & 0x38;
+    uint32_t srcb_row = tt->srcb_rwc[tid] & (bcast_srcb_row ? 0x3F : 0x38);
+    uint32_t math_offset = tt->thd_reg[tid][1];
+    uint32_t dest_base = (dst_row + math_offset + tt->dest_rwc[tid]) & (0x400 - num_rows);
+
+    TT_DBG("[MVMUL] srca_row=%d srcb_row=%d dest_base=%d num_rows=%d fidelity=%d\n",
+           srca_row, srcb_row, dest_base, num_rows, tt->fidelity[tid]);
+
+    /* Matrix multiply: Dst[i][j] += sum_k(SrcB[i][k] * SrcA[k][j])
+     * SrcB is 8x16 (or 7x16 broadcast), SrcA is 16x16
+     *
+     * Fidelity phases: In HiFi4 mode the hardware replays MVMULs 4 times,
+     * each phase using different mantissa bits from SrcA/SrcB.  The sum of
+     * 4 partial products approximates one full-precision multiply.
+     * The emulator uses full float32, so a single phase already gives the
+     * exact result.  Skip computation for phases > 0 to avoid 4× scaling.
+     */
+    if (tt->fidelity[tid] != 0)
+        goto mvmul_skip_compute;
+
+    for (unsigned i = 0; i < num_rows; i++) {
+        uint32_t sb_idx = srcb_row + (bcast_srcb_row ? 0 : i);
+        uint32_t d_idx  = dest_base + i;
+
+        if (sb_idx >= SRCB_ROWS || d_idx >= DEST_ROWS)
+            continue;
+
+        for (unsigned j = 0; j < ROW_SIZE; j++) {
+            float sum = 0.0f;
+            for (unsigned k = 0; k < ROW_SIZE; k++) {
+                uint32_t sa_idx = srca_row + k;
+                if (sa_idx >= SRCA_ROWS) continue;
+                sum += tt->srcb[sb_idx][k] * tt->srca[sa_idx][j];
+            }
+            tt->dest[d_idx][j] += sum;
+        }
+    }
+
+mvmul_skip_compute:
+    /* Flip source banks (release to unpacker) */
+    if (flip_srca) {
+        tt->srca_dvalid = false;
+    }
+    if (flip_srcb) {
+        tt->srcb_dvalid = false;
+    }
+
+    apply_addr_mod(tt, addr_mode & 0x7, tid);
+    return true;
+}
 static bool ttelwmul(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool ttelwadd(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_ELWADD(clear_dvalid, dest_accum_en, instr_mod19, addr_mode, dst)
@@ -902,11 +1042,12 @@ static bool ttpacr(tensix_t *tt, uint32_t imm, int tid) {
     /* L1 byte base address (skip 16-byte tile header) */
     uint32_t l1_base_byte_addr = (l1_dest_addr & 0x1FFFF) << 4;
 
-    /* Process each active packer */
-    for (int pi = 0; pi < 4; pi++) {
-        if (!((packer_mask >> pi) & 1)) continue;
-
-        /* Compute Dest input address */
+    /* Compute Dest input address.
+     * The packer_mask selects which physical packer interfaces are active.
+     * In hardware, all active packers work in parallel on the SAME data block.
+     * We use cfg[180] (packer section 0) for the dest offset.
+     */
+    {
         uint32_t addr = pck_base_in
             + adc->ch0_x * (pck_xstride_in & 0xF)
             + adc->ch0_y * pck_ystride_in
@@ -916,10 +1057,10 @@ static bool ttpacr(tensix_t *tt, uint32_t imm, int tid) {
         /* Convert byte address to datum address */
         addr = ((addr / bytes_per_datum) & ~adc_x_mask) + (adc->ch0_x & adc_x_mask);
 
-        /* Add DEST_TARGET_REG_CFG_PACK_SEC[pi].Offset << 4 */
+        /* Add DEST_TARGET_REG_CFG_PACK_SEC0.Offset << 4 */
         uint32_t dest_offset = 0;
-        if (180 + (uint32_t)pi < CFG_REG_COUNT) {
-            dest_offset = tensix_read_cfg(&tt->mem, 180 + pi) & 0xFFF;
+        if (180 < CFG_REG_COUNT) {
+            dest_offset = tensix_read_cfg(&tt->mem, 180) & 0xFFF;
         }
         addr += dest_offset << 4;
 
@@ -951,50 +1092,50 @@ static bool ttpacr(tensix_t *tt, uint32_t imm, int tid) {
          */
         uint32_t l1_byte_addr = l1_base_byte_addr + tt->pack_l1_write_offset;
 
-        if (tt->mem.l1_scratchpad == NULL || num_datums == 0) continue;
+        if (tt->mem.l1_scratchpad != NULL && num_datums > 0) {
 
-        TT_DBG("[PACR] packer=%d, src_addr=%d, num_datums=%d, l1_addr=0x%x, out_fmt=%d\n",
-               pi, src_addr, num_datums, l1_byte_addr, out_data_fmt);
-        TT_DBG("[PACR] Dest[%d][0..3] = %f %f %f %f\n", src_addr >> 4,
-               tt->dest[src_addr >> 4][0], tt->dest[src_addr >> 4][1],
-               tt->dest[src_addr >> 4][2], tt->dest[src_addr >> 4][3]);
+            TT_DBG("[PACR] src_addr=%d, num_datums=%d, l1_addr=0x%x, out_fmt=%d\n",
+                   src_addr, num_datums, l1_byte_addr, out_data_fmt);
+            TT_DBG("[PACR] Dest[%d][0..3] = %f %f %f %f\n", src_addr >> 4,
+                   tt->dest[src_addr >> 4][0], tt->dest[src_addr >> 4][1],
+                   tt->dest[src_addr >> 4][2], tt->dest[src_addr >> 4][3]);
 
-        /* Read 2D block from Dest (y_count rows × x_count cols).
-         * ystride_datums is the Dest row stride in datum units (from pck_ystride_in).
-         * Output to L1 is sequential (row after row, no gaps).
-         */
-        /* Dest is 16 columns wide; one row = 16 datums */
-        uint32_t ystride_datums = 16;
+            /* Read 2D block from Dest (y_count rows × x_count cols).
+             * Dest is 16 columns wide; one row = 16 datums.
+             * Output to L1 is sequential (row after row, no gaps).
+             */
+            uint32_t ystride_datums = 16;
 
-        uint32_t pack_reg0 = tt->thd_reg[tid][37];
-        uint32_t ysrc_incr0 = pack_reg0 & 0xF;
-        uint32_t y_count = (ysrc_incr0 > 0) ? ysrc_incr0 : 1;
-        uint32_t x_count = (num_datums > 0) ? num_datums / y_count : 0;
+            uint32_t pack_reg0 = tt->thd_reg[tid][37];
+            uint32_t ysrc_incr0 = pack_reg0 & 0xF;
+            uint32_t y_count = (ysrc_incr0 > 0) ? ysrc_incr0 : 1;
+            uint32_t x_count = (num_datums > 0) ? num_datums / y_count : 0;
 
-        uint32_t l1_idx = 0;
-        for (uint32_t row = 0; row < y_count; row++) {
-            for (uint32_t col = 0; col < x_count; col++) {
-                uint32_t d_idx = src_addr + row * ystride_datums + col;
-                uint32_t d_row = (d_idx >> 4) & 0x3FF;
-                uint32_t d_col = d_idx & 0xF;
+            uint32_t l1_idx = 0;
+            for (uint32_t row = 0; row < y_count; row++) {
+                for (uint32_t col = 0; col < x_count; col++) {
+                    uint32_t d_idx = src_addr + row * ystride_datums + col;
+                    uint32_t d_row = (d_idx >> 4) & 0x3FF;
+                    uint32_t d_col = d_idx & 0xF;
 
-                float val = 0.0f;
-                if (!zero_write && d_row < DEST_ROWS) {
-                    val = tt->dest[d_row][d_col];
+                    float val = 0.0f;
+                    if (!zero_write && d_row < DEST_ROWS) {
+                        val = tt->dest[d_row][d_col];
+                    }
+
+                    uint32_t raw = float_to_datum(val, out_data_fmt);
+                    uint32_t l1_off = l1_byte_addr + l1_idx * out_dsb;
+                    if (l1_off + out_dsb <= 0x180000) {
+                        memcpy(tt->mem.l1_scratchpad + l1_off, &raw, out_dsb);
+                        if (l1_idx < 4) TT_DBG("[PACR]   Dest[%d][%d]=%f -> L1[0x%x]=0x%x\n", d_row, d_col, val, l1_off, raw);
+                    }
+                    l1_idx++;
                 }
-
-                uint32_t raw = float_to_datum(val, out_data_fmt);
-                uint32_t l1_off = l1_byte_addr + l1_idx * out_dsb;
-                if (l1_off + out_dsb <= 0x180000) {
-                    memcpy(tt->mem.l1_scratchpad + l1_off, &raw, out_dsb);
-                    if (l1_idx < 4) TT_DBG("[PACR]   Dest[%d][%d]=%f -> L1[0x%x]=0x%x\n", d_row, d_col, val, l1_off, raw);
-                }
-                l1_idx++;
             }
-        }
 
-        /* Advance running L1 write offset for next PACR */
-        tt->pack_l1_write_offset += num_datums * out_dsb;
+            /* Advance running L1 write offset for next PACR */
+            tt->pack_l1_write_offset += num_datums * out_dsb;
+        }
     }
 
     /* Apply packer address modifier from ThreadConfig thd_reg[37+i]
@@ -1206,7 +1347,11 @@ static bool ttunpacr(tensix_t *tt, uint32_t imm, int tid) {
     /* 1-byte formats: no shift needed */
     }
 
-    /* Main unpack loop: read from L1, convert, write to SrcA/SrcB */
+    /* Main unpack loop: read from L1, convert, write to SrcA/SrcB.
+     * The firmware sets ADC ch1_x to span all faces (e.g. 1023 for 4 faces
+     * of 256 datums), so input_num_datums already covers the full tile.
+     * No per-face iteration is needed here.
+     */
     TT_DBG("[UNPACR] which=%d, in_addr=0x%x, num_datums=%d, out_addr=%d, in_fmt=%d, out_fmt=%d\n",
            which_unp, in_addr_datums, input_num_datums, out_addr, in_data_fmt, out_data_fmt);
     if (tt->mem.l1_scratchpad != NULL && input_num_datums > 0) {
@@ -1380,7 +1525,39 @@ static bool ttreg2flop(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)im
 static bool ttloadind(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool ttpacr_setreg(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool tttbufcmd(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsetadc(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttsetadc(tensix_t *tt, uint32_t imm, int tid) {
+    /* ckernel_ops.h: TT_OP_SETADC(CntSetMask, ChannelIndex, DimensionIndex, Value)
+     * Encoding: CntSetMask<<21 | ChannelIndex<<20 | DimensionIndex<<18 | Value<<0
+     *
+     * ISA: Set one ADC counter (and its _Cr checkpoint) to NewValue.
+     *   XYZW: 0=X, 1=Y, 2=Z, 3=W
+     */
+    uint32_t cnt_set_mask = (imm >> 21) & 0x7;
+    uint32_t channel      = (imm >> 20) & 0x1;
+    uint32_t xyzw         = (imm >> 18) & 0x3;
+    uint32_t value        = imm & 0x3FFFF;
+
+    for (int t = 0; t < 3; t++) {
+        if (!((cnt_set_mask >> t) & 1)) continue;
+        AddrCtrl *a = &tt->adc[t];
+        if (channel == 0) {
+            switch (xyzw) {
+            case 0: a->ch0_x = value; a->ch0_x_cr = value; break;
+            case 1: a->ch0_y = value; a->ch0_y_cr = value; break;
+            case 2: a->ch0_z = value; a->ch0_z_cr = value; break;
+            case 3: a->ch0_w = value; a->ch0_w_cr = value; break;
+            }
+        } else {
+            switch (xyzw) {
+            case 0: a->ch1_x = value; a->ch1_x_cr = value; break;
+            case 1: a->ch1_y = value; a->ch1_y_cr = value; break;
+            case 2: a->ch1_z = value; a->ch1_z_cr = value; break;
+            case 3: a->ch1_w = value; a->ch1_w_cr = value; break;
+            }
+        }
+    }
+    return true;
+}
 static bool ttsetadcxy(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_SETADCXY(CntSetMask, Ch1_Y, Ch1_X, Ch0_Y, Ch0_X, BitMask)
      * Encoding: CntSetMask<<21 | Ch1_Y<<15 | Ch1_X<<12 | Ch0_Y<<9 | Ch0_X<<6 | BitMask<<0
@@ -1415,8 +1592,58 @@ static bool ttsetadcxy(tensix_t *tt, uint32_t imm, int tid) {
     }
     return true;
 }
-static bool ttincadcxy(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttaddrcrxy(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttincadcxy(tensix_t *tt, uint32_t imm, int tid) {
+    /* ckernel_ops.h: TT_OP_INCADCXY(CntSetMask, Ch1_Y, Ch1_X, Ch0_Y, Ch0_X)
+     * Encoding: CntSetMask<<21 | Ch1_Y<<15 | Ch1_X<<12 | Ch0_Y<<9 | Ch0_X<<6
+     *
+     * ISA: Unconditionally increments X and Y counters (no bitmask).
+     *   ADC.Channel[0].X += X0Inc;
+     *   ADC.Channel[0].Y += Y0Inc;
+     *   ADC.Channel[1].X += X1Inc;
+     *   ADC.Channel[1].Y += Y1Inc;
+     */
+    uint32_t cnt_set_mask = (imm >> 21) & 0x7;
+    uint32_t y1_inc = (imm >> 15) & 0x7;
+    uint32_t x1_inc = (imm >> 12) & 0x7;
+    uint32_t y0_inc = (imm >> 9) & 0x7;
+    uint32_t x0_inc = (imm >> 6) & 0x7;
+
+    for (int t = 0; t < 3; t++) {
+        if (!((cnt_set_mask >> t) & 1)) continue;
+        AddrCtrl *a = &tt->adc[t];
+        a->ch0_x += x0_inc;
+        a->ch0_y += y0_inc;
+        a->ch1_x += x1_inc;
+        a->ch1_y += y1_inc;
+    }
+    return true;
+}
+static bool ttaddrcrxy(tensix_t *tt, uint32_t imm, int tid) {
+    /* ckernel_ops.h: TT_OP_ADDRCRXY(CntSetMask, Ch1_Y, Ch1_X, Ch0_Y, Ch0_X, BitMask)
+     * Encoding: CntSetMask<<21 | Ch1_Y<<15 | Ch1_X<<12 | Ch0_Y<<9 | Ch0_X<<6 | BitMask<<0
+     *
+     * ISA: Increment _Cr first, then copy _Cr to counter (checkpoint-restore).
+     *   BitMask[3:0]: bit0=X0, bit1=Y0, bit2=X1, bit3=Y1
+     *   BitMask[5:4]: ThreadOverride (ignored, use CurrentThread)
+     *   if (X0) _Cr += Inc, counter = _Cr
+     */
+    uint32_t cnt_set_mask = (imm >> 21) & 0x7;
+    uint32_t y1_inc = (imm >> 15) & 0x7;
+    uint32_t x1_inc = (imm >> 12) & 0x7;
+    uint32_t y0_inc = (imm >> 9) & 0x7;
+    uint32_t x0_inc = (imm >> 6) & 0x7;
+    uint32_t bitmask = imm & 0xF;
+
+    for (int t = 0; t < 3; t++) {
+        if (!((cnt_set_mask >> t) & 1)) continue;
+        AddrCtrl *a = &tt->adc[t];
+        if (bitmask & 0x1) { a->ch0_x_cr += x0_inc; a->ch0_x = a->ch0_x_cr; }
+        if (bitmask & 0x2) { a->ch0_y_cr += y0_inc; a->ch0_y = a->ch0_y_cr; }
+        if (bitmask & 0x4) { a->ch1_x_cr += x1_inc; a->ch1_x = a->ch1_x_cr; }
+        if (bitmask & 0x8) { a->ch1_y_cr += y1_inc; a->ch1_y = a->ch1_y_cr; }
+    }
+    return true;
+}
 static bool ttsetadczw(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_SETADCZW(CntSetMask, Ch1_W, Ch1_Z, Ch0_W, Ch0_Z, BitMask)
      * Encoding: CntSetMask<<21 | Ch1_W<<15 | Ch1_Z<<12 | Ch0_W<<9 | Ch0_Z<<6 | BitMask<<0
@@ -1442,8 +1669,53 @@ static bool ttsetadczw(tensix_t *tt, uint32_t imm, int tid) {
     }
     return true;
 }
-static bool ttincadczw(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttaddrcrzw(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttincadczw(tensix_t *tt, uint32_t imm, int tid) {
+    /* ckernel_ops.h: TT_OP_INCADCZW(CntSetMask, Ch1_W, Ch1_Z, Ch0_W, Ch0_Z)
+     * Encoding: CntSetMask<<21 | Ch1_W<<15 | Ch1_Z<<12 | Ch0_W<<9 | Ch0_Z<<6
+     *
+     * ISA: Unconditionally increments Z and W counters.
+     */
+    uint32_t cnt_set_mask = (imm >> 21) & 0x7;
+    uint32_t w1_inc = (imm >> 15) & 0x7;
+    uint32_t z1_inc = (imm >> 12) & 0x7;
+    uint32_t w0_inc = (imm >> 9) & 0x7;
+    uint32_t z0_inc = (imm >> 6) & 0x7;
+
+    for (int t = 0; t < 3; t++) {
+        if (!((cnt_set_mask >> t) & 1)) continue;
+        AddrCtrl *a = &tt->adc[t];
+        a->ch0_z += z0_inc;
+        a->ch0_w += w0_inc;
+        a->ch1_z += z1_inc;
+        a->ch1_w += w1_inc;
+    }
+    return true;
+}
+static bool ttaddrcrzw(tensix_t *tt, uint32_t imm, int tid) {
+    /* ckernel_ops.h: TT_OP_ADDRCRZW(CntSetMask, Ch1_W, Ch1_Z, Ch0_W, Ch0_Z, BitMask)
+     * Encoding: CntSetMask<<21 | Ch1_W<<15 | Ch1_Z<<12 | Ch0_W<<9 | Ch0_Z<<6 | BitMask<<0
+     *
+     * ISA: Increment _Cr first, then copy _Cr to counter (checkpoint-restore).
+     *   BitMask[3:0]: bit0=Z0, bit1=W0, bit2=Z1, bit3=W1
+     *   BitMask[5:4]: ThreadOverride (ignored, use CurrentThread)
+     */
+    uint32_t cnt_set_mask = (imm >> 21) & 0x7;
+    uint32_t w1_inc = (imm >> 15) & 0x7;
+    uint32_t z1_inc = (imm >> 12) & 0x7;
+    uint32_t w0_inc = (imm >> 9) & 0x7;
+    uint32_t z0_inc = (imm >> 6) & 0x7;
+    uint32_t bitmask = imm & 0xF;
+
+    for (int t = 0; t < 3; t++) {
+        if (!((cnt_set_mask >> t) & 1)) continue;
+        AddrCtrl *a = &tt->adc[t];
+        if (bitmask & 0x1) { a->ch0_z_cr += z0_inc; a->ch0_z = a->ch0_z_cr; }
+        if (bitmask & 0x2) { a->ch0_w_cr += w0_inc; a->ch0_w = a->ch0_w_cr; }
+        if (bitmask & 0x4) { a->ch1_z_cr += z1_inc; a->ch1_z = a->ch1_z_cr; }
+        if (bitmask & 0x8) { a->ch1_w_cr += w1_inc; a->ch1_w = a->ch1_w_cr; }
+    }
+    return true;
+}
 static bool ttsetdvalid(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_SETDVALID(setvalid)
      * Encoding: setvalid<<0 (24-bit field, only bits[1:0] meaningful)
@@ -1458,12 +1730,107 @@ static bool ttsetdvalid(tensix_t *tt, uint32_t imm, int tid) {
         tt->srcb_dvalid = true;
     return true;
 }
-static bool ttadddmareg(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttsubdmareg(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttmuldmareg(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttbitwopdmareg(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttshiftdmareg(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
-static bool ttcmpdmareg(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+/* Helper: decode common DMA-reg ALU encoding.
+ * ADDDMAREG/SUBDMAREG/MULDMAREG: OpBisConst<<23 | Result<<12 | OpB<<6 | OpA<<0
+ * BITWOPDMAREG/SHIFTDMAREG/CMPDMAREG: OpBisConst<<23 | OpSel<<18 | Result<<12 | OpB<<6 | OpA<<0
+ */
+static bool ttadddmareg(tensix_t *tt, uint32_t imm, int tid) {
+    uint32_t is_const  = (imm >> 23) & 0x1;
+    uint32_t result_r  = (imm >> 12) & 0x3F;
+    uint32_t opb_field = (imm >> 6) & 0x3F;
+    uint32_t opa_r     = imm & 0x3F;
+
+    uint32_t left  = (opa_r < DMA_REG_COUNT) ? tt->dma_reg[tid][opa_r] : 0;
+    uint32_t right = is_const ? opb_field : ((opb_field < DMA_REG_COUNT) ? tt->dma_reg[tid][opb_field] : 0);
+    if (result_r < DMA_REG_COUNT)
+        tt->dma_reg[tid][result_r] = left + right;
+    return true;
+}
+static bool ttsubdmareg(tensix_t *tt, uint32_t imm, int tid) {
+    uint32_t is_const  = (imm >> 23) & 0x1;
+    uint32_t result_r  = (imm >> 12) & 0x3F;
+    uint32_t opb_field = (imm >> 6) & 0x3F;
+    uint32_t opa_r     = imm & 0x3F;
+
+    uint32_t left  = (opa_r < DMA_REG_COUNT) ? tt->dma_reg[tid][opa_r] : 0;
+    uint32_t right = is_const ? opb_field : ((opb_field < DMA_REG_COUNT) ? tt->dma_reg[tid][opb_field] : 0);
+    if (result_r < DMA_REG_COUNT)
+        tt->dma_reg[tid][result_r] = left - right;
+    return true;
+}
+static bool ttmuldmareg(tensix_t *tt, uint32_t imm, int tid) {
+    /* ISA: 16b x 16b unsigned multiply -> 32b result */
+    uint32_t is_const  = (imm >> 23) & 0x1;
+    uint32_t result_r  = (imm >> 12) & 0x3F;
+    uint32_t opb_field = (imm >> 6) & 0x3F;
+    uint32_t opa_r     = imm & 0x3F;
+
+    uint32_t left  = (opa_r < DMA_REG_COUNT) ? tt->dma_reg[tid][opa_r] : 0;
+    uint32_t right = is_const ? opb_field : ((opb_field < DMA_REG_COUNT) ? tt->dma_reg[tid][opb_field] : 0);
+    if (result_r < DMA_REG_COUNT)
+        tt->dma_reg[tid][result_r] = (left & 0xFFFF) * (right & 0xFFFF);
+    return true;
+}
+static bool ttbitwopdmareg(tensix_t *tt, uint32_t imm, int tid) {
+    uint32_t is_const  = (imm >> 23) & 0x1;
+    uint32_t mode      = (imm >> 18) & 0x7;
+    uint32_t result_r  = (imm >> 12) & 0x3F;
+    uint32_t opb_field = (imm >> 6) & 0x3F;
+    uint32_t opa_r     = imm & 0x3F;
+
+    uint32_t left  = (opa_r < DMA_REG_COUNT) ? tt->dma_reg[tid][opa_r] : 0;
+    uint32_t right = is_const ? opb_field : ((opb_field < DMA_REG_COUNT) ? tt->dma_reg[tid][opb_field] : 0);
+    uint32_t result;
+    switch (mode) {
+    case 0: result = left & right; break; /* AND */
+    case 1: result = left | right; break; /* OR */
+    case 2: result = left ^ right; break; /* XOR */
+    default: result = 0; break;
+    }
+    if (result_r < DMA_REG_COUNT)
+        tt->dma_reg[tid][result_r] = result;
+    return true;
+}
+static bool ttshiftdmareg(tensix_t *tt, uint32_t imm, int tid) {
+    uint32_t is_const  = (imm >> 23) & 0x1;
+    uint32_t mode      = (imm >> 18) & 0x7;
+    uint32_t result_r  = (imm >> 12) & 0x3F;
+    uint32_t opb_field = (imm >> 6) & 0x3F;
+    uint32_t opa_r     = imm & 0x3F;
+
+    uint32_t left  = (opa_r < DMA_REG_COUNT) ? tt->dma_reg[tid][opa_r] : 0;
+    uint32_t right = is_const ? (opb_field & 0x1F) :
+                     ((opb_field < DMA_REG_COUNT) ? (tt->dma_reg[tid][opb_field] & 0x1F) : 0);
+    uint32_t result;
+    switch (mode) {
+    case 0: result = left << right; break; /* LEFT */
+    case 1: result = left >> right; break; /* RIGHT */
+    default: result = 0; break;
+    }
+    if (result_r < DMA_REG_COUNT)
+        tt->dma_reg[tid][result_r] = result;
+    return true;
+}
+static bool ttcmpdmareg(tensix_t *tt, uint32_t imm, int tid) {
+    uint32_t is_const  = (imm >> 23) & 0x1;
+    uint32_t mode      = (imm >> 18) & 0x7;
+    uint32_t result_r  = (imm >> 12) & 0x3F;
+    uint32_t opb_field = (imm >> 6) & 0x3F;
+    uint32_t opa_r     = imm & 0x3F;
+
+    uint32_t left  = (opa_r < DMA_REG_COUNT) ? tt->dma_reg[tid][opa_r] : 0;
+    uint32_t right = is_const ? opb_field : ((opb_field < DMA_REG_COUNT) ? tt->dma_reg[tid][opb_field] : 0);
+    uint32_t result;
+    switch (mode) {
+    case 0: result = (left > right) ? 1 : 0; break;  /* GT */
+    case 1: result = (left < right) ? 1 : 0; break;  /* LT */
+    case 2: result = (left == right) ? 1 : 0; break;  /* EQ */
+    default: result = 0; break;
+    }
+    if (result_r < DMA_REG_COUNT)
+        tt->dma_reg[tid][result_r] = result;
+    return true;
+}
 static bool ttsetadcxx(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_SETADCXX(CntSetMask, x_end2, x_start)
      * Encoding: CntSetMask<<21 | x_end2<<10 | x_start<<0
@@ -2337,7 +2704,11 @@ static bool ttwrcfg(tensix_t *tt, uint32_t imm, int tid) {
     uint32_t wr128b    = (imm >> 15) & 0x1;
     uint32_t cfg_index = imm & 0x7FFF;
 
-    uint32_t state_id = tt->thd_reg[tid][0] & 0x1;
+    /* Note: ISA says Config[StateID][CfgIndex], but Blackhole matmul LLK
+     * never calls flip_cfg_state_id(), so state_id is always 0.
+     * The firmware uses MMIO (cfg_write/get_cfg_pointer) with explicit
+     * state offset for Config bank selection instead.
+     */
 
     if (wr128b) {
         /* 128-bit write: copy 4 consecutive 32-bit registers to high_mem */
