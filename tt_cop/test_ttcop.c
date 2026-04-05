@@ -8,6 +8,7 @@
 #include <string.h>
 #include <assert.h>
 #include "tensix.h"
+#include "../rv32sim.h"
 #include "tensix_cop.h"
 
 /* Test result tracking */
@@ -326,7 +327,7 @@ int main(void)
         return 1;
     }
 
-    tensix_init(tt, l1_mem, high_mem, t0_ldm, t1_ldm, t2_ldm);
+    tensix_init(tt, l1_mem, high_mem, t0_ldm, t1_ldm, t2_ldm, 0);
     printf("\n✓ Tensix coprocessor initialized\n");
 
     /* Run all tests */

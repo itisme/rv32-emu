@@ -567,22 +567,20 @@ static bool wait_gate_check(tensix_cop_t *cop, int core_id)
          * C4: Matrix Unit (FPU) pipeline busy for current thread.
          * In synchronous simulator, instructions complete in the same step, pipeline always empty. */
 
-        /* C5: SrcA AllowedClient != Unpackers
-         * i.e. SrcA is currently owned by MatrixUnit (srca_dvalid=true), Unpacker cannot write */
-        if ((cond & (1 << 5)) && core->srca_dvalid)
+        /* C5: SrcA AllowedClient != Unpackers (unpacker bank owned by math) */
+        if ((cond & (1 << 5)) && core->srca_dvalid[core->unp_srca_bank])
             return false;
 
         /* C6: SrcB AllowedClient != Unpackers */
-        if ((cond & (1 << 6)) && core->srcb_dvalid)
+        if ((cond & (1 << 6)) && core->srcb_dvalid[core->unp_srcb_bank])
             return false;
 
-        /* C7: SrcA AllowedClient != MatrixUnit
-         * i.e. SrcA is currently owned by Unpackers (srca_dvalid=false), MatrixUnit cannot read */
-        if ((cond & (1 << 7)) && !core->srca_dvalid)
+        /* C7: SrcA AllowedClient != MatrixUnit (math bank not yet available) */
+        if ((cond & (1 << 7)) && !core->srca_dvalid[core->math_srca_bank])
             return false;
 
         /* C8: SrcB AllowedClient != MatrixUnit */
-        if ((cond & (1 << 8)) && !core->srcb_dvalid)
+        if ((cond & (1 << 8)) && !core->srcb_dvalid[core->math_srcb_bank])
             return false;
 
         /* C9: Mover has outstanding memory requests.
@@ -1020,14 +1018,12 @@ bool tensix_cop_step(tensix_cop_t *cop, int core_id)
      * UNPACR auto-waits for target bank to be owned by Unpackers (dvalid == false).
      * This is the key synchronization mechanism for T0(unpacr)<->T1(math)->T2(pacr) pipeline.
      */
-    if (insn_needs_srca(opcode) && !cop->core->srca_dvalid) {
-        thread->current_insn = insn;
+    if (insn_needs_srca(opcode) && !cop->core->srca_dvalid[cop->core->math_srca_bank]) {        thread->current_insn = insn;
         thread->has_current_insn = true;
         thread->state = THREAD_STATE_WAITING;
         return false;
     }
-    if (insn_needs_srcb(opcode) && !cop->core->srcb_dvalid) {
-        thread->current_insn = insn;
+    if (insn_needs_srcb(opcode) && !cop->core->srcb_dvalid[cop->core->math_srcb_bank]) {        thread->current_insn = insn;
         thread->has_current_insn = true;
         thread->state = THREAD_STATE_WAITING;
         return false;
@@ -1045,14 +1041,12 @@ bool tensix_cop_step(tensix_cop_t *cop, int core_id)
      */
     if (opcode == OPCODE_UNPACR) {
         uint32_t which_unp = (insn >> 23) & 0x1;
-        if (which_unp == 0 && cop->core->srca_dvalid) {
-            thread->current_insn = insn;
+        if (which_unp == 0 && cop->core->srca_dvalid[cop->core->unp_srca_bank]) {            thread->current_insn = insn;
             thread->has_current_insn = true;
             thread->state = THREAD_STATE_WAITING;
             return false;
         }
-        if (which_unp == 1 && cop->core->srcb_dvalid) {
-            thread->current_insn = insn;
+        if (which_unp == 1 && cop->core->srcb_dvalid[cop->core->unp_srcb_bank]) {            thread->current_insn = insn;
             thread->has_current_insn = true;
             thread->state = THREAD_STATE_WAITING;
             return false;
@@ -1218,16 +1212,16 @@ bool tensix_cop_step_direct(tensix_cop_t *cop, int core_id)
         return true;
     }
 
-    /* Replay recording mode: intercept instructions and store in replay buffer */
-    if (cop->core->replay_recording && core_id == cop->core->replay_recording_tid) {
-        uint32_t buf_idx = cop->core->replay_index & 31;
-        cop->core->replay_buffer[buf_idx] = insn;
-        cop->core->replay_index++;
-        cop->core->replay_left--;
-        if (cop->core->replay_left == 0) {
-            cop->core->replay_recording = false;
+    /* Replay recording mode: intercept instructions and store in per-thread replay buffer */
+    if (cop->core->replay_recording[core_id]) {
+        uint32_t buf_idx = cop->core->replay_index[core_id] & 31;
+        cop->core->replay_buffer[core_id][buf_idx] = insn;
+        cop->core->replay_index[core_id]++;
+        cop->core->replay_left[core_id]--;
+        if (cop->core->replay_left[core_id] == 0) {
+            cop->core->replay_recording[core_id] = false;
         }
-        if (cop->core->replay_execute_while_loading) {
+        if (cop->core->replay_execute_while_loading[core_id]) {
             /* Execute the instruction normally as well */
             tensix_cop_execute_insn(cop, core_id, insn);
         }
@@ -1269,13 +1263,11 @@ bool tensix_cop_step_direct(tensix_cop_t *cop, int core_id)
         return true;
     }
 
-    /* dvalid check (hardware auto-wait mechanism) */
-    if (insn_needs_srca(opcode) && !cop->core->srca_dvalid) {
-        thread->state = THREAD_STATE_WAITING;
+    /* dvalid check (hardware auto-wait mechanism) - math checks its own bank */
+    if (insn_needs_srca(opcode) && !cop->core->srca_dvalid[cop->core->math_srca_bank]) {        thread->state = THREAD_STATE_WAITING;
         return false;  /* Keep has_direct_insn = true */
     }
-    if (insn_needs_srcb(opcode) && !cop->core->srcb_dvalid) {
-        thread->state = THREAD_STATE_WAITING;
+    if (insn_needs_srcb(opcode) && !cop->core->srcb_dvalid[cop->core->math_srcb_bank]) {        thread->state = THREAD_STATE_WAITING;
         return false;
     }
     if (insn_needs_dest(opcode) && !cop->core->dest_dvalid) {
@@ -1283,15 +1275,13 @@ bool tensix_cop_step_direct(tensix_cop_t *cop, int core_id)
         return false;
     }
 
-    /* UNPACR reverse dvalid: wait for target bank to be owned by Unpackers */
+    /* UNPACR reverse dvalid: wait for unpacker's bank to be owned by Unpackers */
     if (opcode == OPCODE_UNPACR) {
         uint32_t which_unp = (insn >> 23) & 0x1;
-        if (which_unp == 0 && cop->core->srca_dvalid) {
-            thread->state = THREAD_STATE_WAITING;
+        if (which_unp == 0 && cop->core->srca_dvalid[cop->core->unp_srca_bank]) {            thread->state = THREAD_STATE_WAITING;
             return false;
         }
-        if (which_unp == 1 && cop->core->srcb_dvalid) {
-            thread->state = THREAD_STATE_WAITING;
+        if (which_unp == 1 && cop->core->srcb_dvalid[cop->core->unp_srcb_bank]) {            thread->state = THREAD_STATE_WAITING;
             return false;
         }
     }
@@ -1539,7 +1529,7 @@ static bool drain_replay_expansion(tensix_cop_t *cop, int core_id)
         }
 
         uint32_t buf_idx = (core->replay_expand_start[core_id] + core->replay_expand_current[core_id]) & 31;
-        uint32_t insn = core->replay_buffer[buf_idx];
+        uint32_t insn = core->replay_buffer[core_id][buf_idx];
         core->replay_expand_current[core_id]++;
         thread->current_insn = insn;
         thread->has_current_insn = true;
@@ -1615,6 +1605,13 @@ void tensix_cop_mop_expand(tensix_cop_t *cop, int core_id, uint32_t param)
     memset(st, 0, sizeof(*st));
     st->active = true;
     st->tmpl = tmpl;
+
+    /* [DEBUG-OFF] MOP templates are fixed per thread, print once only */
+    /*
+    fprintf(stderr, "[MOP-EXPAND] core=%d tmpl=%d param=0x%06x cfg=[0x%x,0x%x,0x%x,0x%x,0x%x,0x%x,0x%x,0x%x,0x%x]\n",
+            core_id, tmpl, param,
+            cfg[0], cfg[1], cfg[2], cfg[3], cfg[4], cfg[5], cfg[6], cfg[7], cfg[8]);
+    */
 
     if (tmpl == 0) {
         uint32_t count1 = (param >> 16) & 0x7F;

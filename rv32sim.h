@@ -51,7 +51,8 @@ void tensix_init(tensix_t *tt,
                  uint8_t *high_mem,
                  uint8_t *t0_ldm,
                  uint8_t *t1_ldm,
-                 uint8_t *t2_ldm);
+                 uint8_t *t2_ldm,
+                 uint16_t noc_xy);
 
 #ifdef __cplusplus
 }

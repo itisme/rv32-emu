@@ -321,13 +321,26 @@ static inline void tensix_write_cfg(tensix_memory_t *mem, uint32_t reg_idx, uint
 struct tensix {
     tensix_memory_t mem;     /* Memory regions accessible by Tensix */
     tensix_cop_t *cop;       /* Coprocessor state machine */
+    uint16_t noc_xy;         /* NOC coordinate: (y<<6)|x, matches tt-metal convention */
 
-    float srca[SRCA_ROWS][ROW_SIZE];
-    float srcb[SRCB_ROWS][ROW_SIZE];
+    /* SrcA/SrcB: double-buffered (2 banks each).
+     * Each bank has AllowedClient: false=Unpackers can write, true=MatrixUnit can read.
+     * Unpacker tracks its current bank; math unit tracks its current bank. */
+    float srca[2][SRCA_ROWS][ROW_SIZE];
+    float srcb[2][SRCB_ROWS][ROW_SIZE];
+    bool srca_dvalid[2];   /* per-bank: true=MatrixUnit owns, false=Unpacker owns */
+    bool srcb_dvalid[2];
+    bool srcb_zeroed[2];   /* true if bank was zeroed by ZEROSRC and not yet written by real UNPACR */
+    uint8_t unp_srca_bank; /* unpacker's current bank for SrcA */
+    uint8_t unp_srcb_bank; /* unpacker's current bank for SrcB */
+    uint8_t math_srca_bank; /* math unit's current bank for SrcA */
+    uint8_t math_srcb_bank; /* math unit's current bank for SrcB */
+    uint8_t last_unp_srca_bank; /* bank where UNPACR last wrote SrcA data */
+    uint8_t mova2d_latched_bank; /* latched bank for current datacopy MOP */
+    bool    mova2d_bank_valid;   /* true while mova2d_latched_bank is latched */
+
     float dest[DEST_ROWS][ROW_SIZE];
-    bool srca_dvalid;
-    bool srcb_dvalid;
-    bool dest_dvalid;  /* Dest register contains valid data (set by ELWADD, cleared by PACR) */
+    volatile bool dest_dvalid;  /* Dest register contains valid data (set by ELWADD, cleared by PACR) */
     uint32_t pack_l1_write_offset;  /* Running L1 write byte offset for packer (auto-increments) */
     uint32_t pack_l1_dest_addr_raw; /* Last raw cfg[69] value, to detect new tile */
     /* Per-thread RWC counters (ISA: RWCs[CurrentThread]) */
@@ -400,12 +413,13 @@ struct tensix {
     MopTemplate0 mop_templ_0;
     MopTemplate1 mop_templ_1;
     uint32_t log2_replay_buffer_depth;
-    uint32_t replay_buffer[32];    /* 32 instruction words, per-thread replay */
-    uint32_t replay_index;         /* Current recording position */
-    uint32_t replay_left;          /* Instructions remaining to record */
-    bool replay_execute_while_loading; /* Execute while recording */
-    bool replay_recording;         /* True when recording mode active */
-    int replay_recording_tid;      /* Thread ID doing the recording */
+
+    /* Per-thread replay state (ISA: ReplayBuffer is per-thread) */
+    uint32_t replay_buffer[3][32];    /* Per-thread, 32 instruction words each */
+    uint32_t replay_index[3];         /* Per-thread recording position */
+    uint32_t replay_left[3];          /* Per-thread instructions remaining to record */
+    bool replay_execute_while_loading[3]; /* Per-thread execute while recording */
+    bool replay_recording[3];         /* Per-thread: true when recording mode active */
 
     /* Replay expansion state (replaying with proper dvalid checks) */
     bool replay_expanding[3];         /* Per-thread: true when replay expansion is active */
@@ -433,13 +447,6 @@ struct tensix {
  *   - Offset 0x1000-0x2FFF (8KB): Slow access LDM, maps to virtual 0xFFB1x000
  *   - Offset 0x3000-0x3FFF (4KB): REGFILE/GPRs, maps to virtual 0xFFE00000
  */
-void tensix_init(tensix_t *tt,
-                 uint8_t *l1_scratchpad_mem,
-                 uint8_t *high_mem,
-                 uint8_t *t0_ldm,
-                 uint8_t *t1_ldm,
-                 uint8_t *t2_ldm);
-
 /* Push instruction to tensix coprocessor FIFO (for sw to INSTRN_BUF) */
 bool tensix_push(tensix_t *tt, uint32_t insn, int core_id);  //core_id coded with t0 (0) ~ t2 (2)
 

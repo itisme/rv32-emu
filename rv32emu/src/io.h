@@ -50,7 +50,8 @@ static inline bool memory_write(memory_t *m,
     /* Bounds checking to prevent buffer overflow */
     //if (addr >= m->mem_size || size > m->mem_size - addr)
     //    return false;
-    uint8_t *dst = addr < HIGH_MEM_OFFSET ? m->mem_base + addr : m->mem_high + (addr - HIGH_MEM_OFFSET);
+    uint8_t *dst = addr < HIGH_MEM_OFFSET ? m->mem_base + addr :
+        (addr - HIGH_MEM_OFFSET) < m->local_size ? m->mem_local + (addr - HIGH_MEM_OFFSET) : m->mem_high + (addr - HIGH_MEM_OFFSET);
     memcpy(dst, src, size);
     return true;
 }
@@ -70,9 +71,8 @@ static inline bool memory_fill(memory_t *m,
                                uint32_t size,
                                uint8_t val)
 {
-    /* Bounds checking to prevent buffer overflow */
-    if (addr >= m->mem_size || size > m->mem_size - addr)
-        return false;
-    memset(m->mem_base + addr, val, size);
+    uint8_t *dst = addr < HIGH_MEM_OFFSET ? m->mem_base + addr :
+        (addr - HIGH_MEM_OFFSET) < m->local_size ? m->mem_local + (addr - HIGH_MEM_OFFSET) : m->mem_high + (addr - HIGH_MEM_OFFSET);
+    memset(dst, val, size);
     return true;
 }

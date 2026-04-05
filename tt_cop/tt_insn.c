@@ -13,6 +13,7 @@
 #include "tensix_cop.h"
 
 
+
 /* Instruction implementation function pointer type.
  * Returns true if the instruction completed, false if blocked/incomplete.
  */
@@ -345,13 +346,20 @@ static bool ttreplay(tensix_t *tt, uint32_t imm, int tid) {
 
     if (count == 0) count = 64; /* Count=0 means 64 */
 
+    /* [DEBUG-OFF] REPLAY printing disabled for focused 4x4 debug */
+    /*
+    if (tt->noc_xy == ((2 << 6) | 1)) {
+        fprintf(stderr, "[REPLAY] NOC(%d,%d) tid=%d load=%d start=%d count=%d exec=%d\n",
+                tt->noc_xy & 0x3F, tt->noc_xy >> 6, tid, load, start_idx, count, exec);
+    }
+    */
+
     if (load) {
         /* Recording mode: set state so tensix_cop_step_direct will record */
-        tt->replay_index = start_idx;
-        tt->replay_left = count;
-        tt->replay_execute_while_loading = (exec != 0);
-        tt->replay_recording = true;
-        tt->replay_recording_tid = tid;
+        tt->replay_index[tid] = start_idx;
+        tt->replay_left[tid] = count;
+        tt->replay_execute_while_loading[tid] = (exec != 0);
+        tt->replay_recording[tid] = true;
     } else {
         /* Replay mode: set up expansion state for proper dvalid checking.
          * The actual replay is handled by drain_replay_expansion() in
@@ -387,6 +395,8 @@ static bool ttzeroacc(tensix_t *tt, uint32_t imm, int tid) {
     uint32_t where      = imm & 0x3FFF;
 
     uint32_t mode = clear_mode & 0x3;
+
+    TT_DBG("[ZEROACC] NOC(0x%x) mode=%d where=%d\n", tt->noc_xy, mode, where);
 
     switch (mode) {
     case 0: /* ONE_ROW */
@@ -440,19 +450,23 @@ static bool ttzerosrc(tensix_t *tt, uint32_t imm, int tid) {
     /* uint32_t bank_mask  = (imm >> 2) & 0x1; */
     uint32_t src_mask   = imm & 0x3;
 
-    /* Simplified: always clear both banks (emulator has single-bank arrays) */
+    uint32_t bank_mask  = (imm >> 2) & 0x1;
     if (src_mask & 0x1) {  /* ClearSrcA */
         float fill = neg_inf ? tt->neginf : 0.0f;
-        for (int i = 0; i < SRCA_ROWS; i++) {
-            for (int j = 0; j < ROW_SIZE; j++) {
-                tt->srca[i][j] = fill;
+        for (int b = 0; b < 2; b++) {
+            if (!bank_mask || b == tt->unp_srca_bank) {
+                for (int i = 0; i < SRCA_ROWS; i++)
+                    for (int j = 0; j < ROW_SIZE; j++)
+                        tt->srca[b][i][j] = fill;
             }
         }
     }
     if (src_mask & 0x2) {  /* ClearSrcB (always zero, never neg_inf) */
-        for (int i = 0; i < SRCB_ROWS; i++) {
-            for (int j = 0; j < ROW_SIZE; j++) {
-                tt->srcb[i][j] = 0.0f;
+        for (int b = 0; b < 2; b++) {
+            if (!bank_mask || b == tt->unp_srcb_bank) {
+                for (int i = 0; i < SRCB_ROWS; i++)
+                    for (int j = 0; j < ROW_SIZE; j++)
+                        tt->srcb[b][i][j] = 0.0f;
             }
         }
     }
@@ -494,6 +508,13 @@ static bool ttmova2d(tensix_t *tt, uint32_t imm, int tid) {
         srca_row &= 0x3F;
     }
 
+    /* ISA: MOVA2D auto-waits until SrcA[MatrixUnit.SrcABank] is owned by
+     * the MatrixUnit (dvalid=true).  Stall (return false) if not ready. */
+    if (!tt->srca_dvalid[tt->math_srca_bank]) return false;
+
+    /* ISA: uses MatrixUnit.SrcABank (same bank selector as MVMUL). */
+    uint8_t mova2d_bank = tt->math_srca_bank;
+
     /* Copy SrcA rows to Dest (simplified: BF16-as-float passthrough) */
     for (unsigned i = 0; i < num_rows; i++) {
         uint32_t sa_idx = srca_row + i;
@@ -501,12 +522,12 @@ static bool ttmova2d(tensix_t *tt, uint32_t imm, int tid) {
         if (sa_idx >= SRCA_ROWS || d_idx >= DEST_ROWS)
             continue;
         for (int j = 0; j < ROW_SIZE; j++) {
-            tt->dest[d_idx][j] = tt->srca[sa_idx][j];
+            tt->dest[d_idx][j] = tt->srca[mova2d_bank][sa_idx][j];
         }
     }
 
-    TT_DBG("[MOVA2D] srca_row=%d, dest_base=%d, num_rows=%d\n",
-           srca_row, dest_base, num_rows);
+    TT_DBG("[MOVA2D] srca_row=%d, dest_base=%d, num_rows=%d, bank=%d (last_unp)\n",
+           srca_row, dest_base, num_rows, mova2d_bank);
 
     /* Note: srca_dvalid is NOT cleared here. It is cleared by SETRWC
      * (clear_ab_vld) which appears as end_op0 in the MOP template. */
@@ -540,6 +561,25 @@ static bool ttmvmul(tensix_t *tt, uint32_t imm, int tid) {
      *   instr_mod19 bit0: BroadcastSrcBRow
      *   addr_mode[4:0]: AddrMod index
      */
+    /* ISA auto-wait: "Matrix Unit instructions which read from SrcA or
+     * SrcB automatically wait" until the banks are owned by MatrixUnit
+     * (dvalid=true).  Stall if data not yet loaded by Unpacker. */
+    if (!tt->srca_dvalid[tt->math_srca_bank]) return false;
+    if (!tt->srcb_dvalid[tt->math_srcb_bank]) return false;
+
+    /* If current SrcB bank was zeroed by ZEROSRC (no real data), skip it
+     * and use the other bank that has real data. This handles the case where
+     * copy_tile's SETRWC(CLR_AB) ping-pongs SrcB banks with ZEROSRC, leaving
+     * math_srcb_bank pointing at a zeroed bank instead of real data.
+     * Release the zeroed bank's dvalid so unpacker can reclaim it. */
+    if (tt->srcb_zeroed[tt->math_srcb_bank] && tt->srcb_dvalid[tt->math_srcb_bank ^ 1]
+        && !tt->srcb_zeroed[tt->math_srcb_bank ^ 1]) {
+        uint8_t zeroed_bank = tt->math_srcb_bank;
+        tt->srcb_dvalid[zeroed_bank] = false;
+        tt->srcb_zeroed[zeroed_bank] = false;
+        tt->math_srcb_bank ^= 1;
+    }
+
     uint32_t clear_dvalid  = (imm >> 22) & 0x3;
     uint32_t instr_mod19   = (imm >> 19) & 0x7;
     uint32_t addr_mode     = (imm >> 14) & 0x1F;
@@ -583,7 +623,7 @@ static bool ttmvmul(tensix_t *tt, uint32_t imm, int tid) {
             for (unsigned k = 0; k < ROW_SIZE; k++) {
                 uint32_t sa_idx = srca_row + k;
                 if (sa_idx >= SRCA_ROWS) continue;
-                sum += tt->srcb[sb_idx][k] * tt->srca[sa_idx][j];
+                sum += tt->srcb[tt->math_srcb_bank][sb_idx][k] * tt->srca[tt->math_srca_bank][sa_idx][j];
             }
             tt->dest[d_idx][j] += sum;
         }
@@ -592,10 +632,11 @@ static bool ttmvmul(tensix_t *tt, uint32_t imm, int tid) {
 mvmul_skip_compute:
     /* Flip source banks (release to unpacker) */
     if (flip_srca) {
-        tt->srca_dvalid = false;
+        tt->srca_dvalid[tt->math_srca_bank] = false;
+        tt->math_srca_bank ^= 1;
     }
-    if (flip_srcb) {
-        tt->srcb_dvalid = false;
+    if (flip_srcb) {        tt->srcb_dvalid[tt->math_srcb_bank] = false;
+        tt->math_srcb_bank ^= 1;
     }
 
     apply_addr_mod(tt, addr_mode & 0x7, tid);
@@ -603,6 +644,10 @@ mvmul_skip_compute:
 }
 static bool ttelwmul(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool ttelwadd(tensix_t *tt, uint32_t imm, int tid) {
+    /* ISA auto-wait: wait for SrcA and SrcB banks to be owned by MatrixUnit */
+    if (!tt->srca_dvalid[tt->math_srca_bank]) return false;
+    if (!tt->srcb_dvalid[tt->math_srcb_bank]) return false;
+
     /* ckernel_ops.h: TT_OP_ELWADD(clear_dvalid, dest_accum_en, instr_mod19, addr_mode, dst)
      * Encoding: clear_dvalid<<22 | dest_accum_en<<21 | instr_mod19<<19 | addr_mode<<14 | dst<<0
      *
@@ -644,12 +689,16 @@ static bool ttelwadd(tensix_t *tt, uint32_t imm, int tid) {
     uint32_t dest_base = (dst_row + tt->dest_rwc[tid] + math_offset) & 0x3F8;
 
     /* Element-wise add: 8 rows x 16 columns */
-    TT_DBG("[ELWADD] srca_row=%d, srcb_row=%d, dest_base=%d, srca_dvalid=%d, srcb_dvalid=%d\n",
-           srca_row, srcb_row, dest_base, tt->srca_dvalid, tt->srcb_dvalid);
-    TT_DBG("[ELWADD] SrcA[%d][0..3] = %f %f %f %f\n", srca_row,
-           tt->srca[srca_row][0], tt->srca[srca_row][1], tt->srca[srca_row][2], tt->srca[srca_row][3]);
-    TT_DBG("[ELWADD] SrcB[%d][0..3] = %f %f %f %f\n", srcb_row,
-           tt->srcb[srcb_row][0], tt->srcb[srcb_row][1], tt->srcb[srcb_row][2], tt->srcb[srcb_row][3]);
+    uint8_t ma_bank = tt->math_srca_bank;
+    uint8_t mb_bank = tt->math_srcb_bank;
+    TT_DBG("[ELWADD] srca_row=%d, srcb_row=%d, dest_base=%d, bank_a=%d, bank_b=%d\n",
+           srca_row, srcb_row, dest_base, ma_bank, mb_bank);
+    TT_DBG("[ELWADD] SrcA[%d][%d][0..3] = %f %f %f %f\n", ma_bank, srca_row,
+           tt->srca[ma_bank][srca_row][0], tt->srca[ma_bank][srca_row][1],
+           tt->srca[ma_bank][srca_row][2], tt->srca[ma_bank][srca_row][3]);
+    TT_DBG("[ELWADD] SrcB[%d][%d][0..3] = %f %f %f %f\n", mb_bank, srcb_row,
+           tt->srcb[mb_bank][srcb_row][0], tt->srcb[mb_bank][srcb_row][1],
+           tt->srcb[mb_bank][srcb_row][2], tt->srcb[mb_bank][srcb_row][3]);
     for (int i = 0; i < 8; i++) {
         uint32_t sa_idx = srca_row + i;
         uint32_t sb_idx = srcb_row + (bcast_srcb_row ? 0 : i);
@@ -659,8 +708,8 @@ static bool ttelwadd(tensix_t *tt, uint32_t imm, int tid) {
             continue;
 
         for (int j = 0; j < ROW_SIZE; j++) {
-            float a_val = tt->srca[sa_idx][j];
-            float b_val = tt->srcb[sb_idx][bcast_srcb_col0 ? 0 : j];
+            float a_val = tt->srca[ma_bank][sa_idx][j];
+            float b_val = tt->srcb[mb_bank][sb_idx][bcast_srcb_col0 ? 0 : j];
             float result = a_val + b_val;
 
             if (dest_accum)
@@ -687,8 +736,13 @@ static bool ttelwadd(tensix_t *tt, uint32_t imm, int tid) {
      */
 
     /* Flip source banks (release to unpacker) */
-    if (flip_srca) tt->srca_dvalid = false;
-    if (flip_srcb) tt->srcb_dvalid = false;
+    if (flip_srca) {
+        tt->srca_dvalid[tt->math_srca_bank] = false;
+        tt->math_srca_bank ^= 1;
+    }
+    if (flip_srcb) {        tt->srcb_dvalid[tt->math_srcb_bank] = false;
+        tt->math_srcb_bank ^= 1;
+    }
 
     /* Apply address modifier */
     apply_addr_mod(tt, addr_mode, tid);
@@ -716,14 +770,19 @@ static bool ttcleardvalid(tensix_t *tt, uint32_t imm, int tid) {
     /* uint32_t keep_same = (imm >> 1) & 0x1; */
 
     if (reset) {
-        tt->srca_dvalid = false;
-        tt->srcb_dvalid = false;
+        tt->srca_dvalid[0] = tt->srca_dvalid[1] = false;
+        tt->srcb_dvalid[0] = tt->srcb_dvalid[1] = false;
+        tt->unp_srca_bank = tt->unp_srcb_bank = 0;
+        tt->math_srca_bank = tt->math_srcb_bank = 0;
         tt->dest_dvalid = false;
     } else {
-        if (flip & 0x1)  /* FlipSrcA */
-            tt->srca_dvalid = false;
-        if (flip & 0x2)  /* FlipSrcB */
-            tt->srcb_dvalid = false;
+        if (flip & 0x1) { /* FlipSrcA: give math bank back to unpacker */
+            tt->srca_dvalid[tt->math_srca_bank] = false;
+            tt->math_srca_bank ^= 1;
+        }
+        if (flip & 0x2) { /* FlipSrcB */            tt->srcb_dvalid[tt->math_srcb_bank] = false;
+            tt->math_srcb_bank ^= 1;
+        }
     }
     return true;
 }
@@ -774,11 +833,30 @@ static bool ttsetrwc(tensix_t *tt, uint32_t imm, int tid) {
         tt->fidelity[tid] = 0;
     }
 
-    /* FlipSrcA / FlipSrcB */
-    if (clear_ab_vld & 0x1)
-        tt->srca_dvalid = false;
-    if (clear_ab_vld & 0x2)
-        tt->srcb_dvalid = false;
+    /* FlipSrcA / FlipSrcB: give math bank back to unpacker.
+     * Only flip bank pointer if the bank is actually owned by MatrixUnit (dvalid=true).
+     * A redundant flip on an already-free bank would desync the bank pointer,
+     * causing deadlock when unpacker and math expect different banks. */
+    /* NOTE: ISA doc shows CLR_DVALID_SrcA/SrcB_Disable flags in ThreadConfig[7]
+     * (bit0=SrcA, bit1=SrcB). When set, FlipSrc only flips bank pointer without
+     * clearing dvalid. Wormhole firmware uses this for matmul reuse_a/reuse_b
+     * (see tt_llk_wormhole_b0/llk_math_matmul.h:704). However, Blackhole firmware
+     * does NOT set these flags — no TTI_SETC16(CLR_DVALID_SrcB_Disable_ADDR32,...)
+     * exists in tt_llk_blackhole. So we don't implement the disable check here.
+     * If Blackhole firmware adds this in the future, read thd_reg[tid][7] and
+     * skip dvalid clear when the corresponding bit is set. */
+    if (clear_ab_vld & 0x1) {
+        if (tt->srca_dvalid[tt->math_srca_bank]) {
+            tt->srca_dvalid[tt->math_srca_bank] = false;
+            tt->math_srca_bank ^= 1;
+        }
+    }
+    if (clear_ab_vld & 0x2) {
+        if (tt->srcb_dvalid[tt->math_srcb_bank]) {
+            tt->srcb_dvalid[tt->math_srcb_bank] = false;
+            tt->math_srcb_bank ^= 1;
+        }
+    }
     return true;
 }
 static bool ttincrwc(tensix_t *tt, uint32_t imm, int tid) {
@@ -1133,6 +1211,8 @@ static bool ttpacr(tensix_t *tt, uint32_t imm, int tid) {
                 }
             }
 
+            /* (TILE-DUMP at tile boundaries handles output logging) */
+
             /* Advance running L1 write offset for next PACR */
             tt->pack_l1_write_offset += num_datums * out_dsb;
         }
@@ -1212,6 +1292,12 @@ static bool ttunpacr(tensix_t *tt, uint32_t imm, int tid) {
     if (cfg_ctx_cnt_inc) {
         return true;
     }
+
+    /* ISA auto-wait: "unpack instructions automatically wait" until the
+     * target bank is owned by Unpackers (dvalid=false).  Stall if the
+     * bank is still owned by MatrixUnit (dvalid=true). */
+    if (which_unp == 0 && tt->srca_dvalid[tt->unp_srca_bank]) return false;
+    if (which_unp == 1 && tt->srcb_dvalid[tt->unp_srcb_bank]) return false;
 
     /*
      * Regular unpack mode: read tile data from L1, convert format,
@@ -1301,6 +1387,9 @@ static bool ttunpacr(tensix_t *tt, uint32_t imm, int tid) {
     TT_DBG("[UNPACR] cfg: base_addr(cfg[%d])=0x%x, offset(cfg[%d])=0x%x, digest=%d, in_addr=0x%x\n",
            reg3_off, base_addr, reg7_off, offset_addr, digest_size, in_addr);
 
+    /* Debug: trace UNPACR reads from c_24 range on NOC(1,2) —
+     * now prints ACTUAL read address (in_addr_datums) not just tile base */
+
     /* Datum size from input format */
     uint32_t dsb = get_datum_size(in_data_fmt);
 
@@ -1374,30 +1463,45 @@ static bool ttunpacr(tensix_t *tt, uint32_t imm, int tid) {
             uint32_t col = datum_idx & 15;
 
             if (which_unp == 1) {
-                /* Write to SrcB */
+                /* Write to SrcB (current unpacker bank) */
                 row = row & 0x3F;
-                if (row < SRCB_ROWS)
-                    tt->srcb[row][col] = val;
+                if (row < SRCB_ROWS) {
+                    tt->srcb[tt->unp_srcb_bank][row][col] = val;
+                    tt->srcb_zeroed[tt->unp_srcb_bank] = false;  /* real data overwrites ZEROSRC */
+                }
             } else {
-                /* Write to SrcA */
+                /* Write to SrcA (current unpacker bank) */
                 row = row & 0x3F;
                 if (row < SRCA_ROWS)
-                    tt->srca[row][col] = val;
+                    tt->srca[tt->unp_srca_bank][row][col] = val;
             }
         }
-        TT_DBG("[UNPACR] After: Src%c[0][0..3] = %f %f %f %f\n", which_unp ? 'B' : 'A',
-               which_unp ? tt->srcb[0][0] : tt->srca[0][0],
-               which_unp ? tt->srcb[0][1] : tt->srca[0][1],
-               which_unp ? tt->srcb[0][2] : tt->srca[0][2],
-               which_unp ? tt->srcb[0][3] : tt->srca[0][3]);
+        uint8_t ub = which_unp ? tt->unp_srcb_bank : tt->unp_srca_bank;
+        TT_DBG("[UNPACR] After: Src%c[%d][0][0..3] = %f %f %f %f\n", which_unp ? 'B' : 'A', ub,
+               which_unp ? tt->srcb[ub][0][0] : tt->srca[ub][0][0],
+               which_unp ? tt->srcb[ub][0][1] : tt->srca[ub][0][1],
+               which_unp ? tt->srcb[ub][0][2] : tt->srca[ub][0][2],
+               which_unp ? tt->srcb[ub][0][3] : tt->srca[ub][0][3]);
+        TT_DBG("[UNPACR] NOC(0x%x) Src%c bank=%d l1=0x%x num=%d out_addr=%d first_datum=%d z=%d\n",
+               tt->noc_xy, which_unp ? 'B' : 'A', ub, in_addr_datums, input_num_datums,
+               out_addr, first_datum, adc->ch0_z);
+        {
+            float (*src)[ROW_SIZE] = which_unp ? tt->srcb[ub] : tt->srca[ub];
+            TT_DBG("[UNPACR] Src%c[0][0..3]: %.6f %.6f %.6f %.6f\n",
+                   which_unp ? 'B' : 'A', src[0][0], src[0][1], src[0][2], src[0][3]);
+        }
     }
 
-    /* Set data valid (give src bank to matrix unit) */
+    /* Set data valid (give src bank to matrix unit) and flip bank */
     if (set_dat_valid) {
-        if (which_unp == 0)
-            tt->srca_dvalid = true;
-        else
-            tt->srcb_dvalid = true;
+        if (which_unp == 0) {
+            tt->last_unp_srca_bank = tt->unp_srca_bank;  /* save for MOVA2D */
+            tt->srca_dvalid[tt->unp_srca_bank] = true;
+            tt->unp_srca_bank ^= 1;
+        } else {
+            tt->srcb_dvalid[tt->unp_srcb_bank] = true;
+            tt->unp_srcb_bank ^= 1;
+        }
     }
 
     /* Update ADC counters based on AddrMode.
@@ -1414,7 +1518,114 @@ static bool ttunpacr(tensix_t *tt, uint32_t imm, int tid) {
     adc->ch1_z += ch1_z_inc;
     return true;
 }
-static bool ttunpacr_nop(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
+static bool ttunpacr_nop(tensix_t *tt, uint32_t imm, int tid) {
+    /* UNPACR_NOP — 5 modes per ISA documentation:
+     *
+     *   bits[2:0]=0x0 → OverlayClear v1 (not implemented)
+     *   bits[2:0]=0x3 → OverlayClear v2 (not implemented)
+     *   bits[2:0]=0x4 → SETREG         (not implemented)
+     *   bits[2:0]=0x2 → NOP            (no effect)
+     *   bits[1:0]=0x1 → ZEROSRC (0x1) / ZEROSRC+NegInfSrcA (0x5)
+     *   bits[2:0]=0x7 → SETDVALID
+     *
+     * Firmware also combines ZEROSRC with Set_Dvalid field (bits[11:8]).
+     *
+     * See tt-isa-documentation/WormholeB0/TensixTile/TensixCoprocessor/UNPACR_NOP*.md
+     */
+    uint32_t which_unp = (imm >> 23) & 0x1;
+
+    /* --- ZEROSRC: bits[1:0]=01 covers mode 0x1 and 0x5 --- */
+    if ((imm & 0x3) == 0x1) {
+        /* ZEROSRC fields (per doc):
+         *   bit[4] = WaitLikeUnpacr
+         *   bit[3] = BothBanks
+         *   bit[2] = NegativeInfSrcA (1 for mode 0x5)
+         * Firmware also uses bits[11:8] = Set_Dvalid (combined with ZEROSRC) */
+        uint32_t wait_like_unpacr = (imm >> 4) & 0x1;
+        uint32_t both_banks       = (imm >> 3) & 0x1;
+        uint32_t neg_inf_srca     = (imm >> 2) & 0x1;
+        uint32_t set_dvalid       = (imm >> 8) & 0xF;
+
+        /* Wait for bank access (doc: while AllowedClient != Unpackers, wait).
+         * WaitLikeUnpacr: 1=check unpacker's bank, 0=check math unit's bank. */
+        if (which_unp == 0) {
+            uint8_t check_bank = wait_like_unpacr ? tt->unp_srca_bank : tt->math_srca_bank;
+            if (tt->srca_dvalid[check_bank]) return false;
+        } else {
+            uint8_t check_bank = wait_like_unpacr ? tt->unp_srcb_bank : tt->math_srcb_bank;
+            if (tt->srcb_dvalid[check_bank]) return false;
+        }
+
+        /* Clear source register data.
+         * NegativeInfSrcA: fill SrcA with all-ones (~0u) instead of zero (SrcA only). */
+        uint8_t unp_bank = which_unp ? tt->unp_srcb_bank : tt->unp_srca_bank;
+        for (unsigned bank = 0; bank < 2; bank++) {
+            if (both_banks || bank == unp_bank) {
+                if (which_unp == 0) {
+                    if (neg_inf_srca) {
+                        memset(tt->srca[bank], 0xFF, sizeof(tt->srca[bank]));
+                    } else {
+                        memset(tt->srca[bank], 0, sizeof(tt->srca[bank]));
+                    }
+                } else {
+                    memset(tt->srcb[bank], 0, sizeof(tt->srcb[bank]));
+                    tt->srcb_zeroed[bank] = true;
+                }
+            }
+        }
+
+        /* Reset MOVA2D bank latch — datacopy session is complete */
+        if (which_unp == 0)
+            tt->mova2d_bank_valid = false;
+
+        TT_DBG("[UNPACR_NOP] ZEROSRC: Src%c %s (both_banks=%d)\n",
+               which_unp ? 'B' : 'A', neg_inf_srca ? "-inf" : "zeroed", both_banks);
+
+        /* Set_Dvalid field (bits[11:8]) — firmware combines ZEROSRC + SET_DVALID */
+        if (set_dvalid) {
+            if (which_unp == 0) {
+                tt->srca_dvalid[tt->unp_srca_bank] = true;
+                tt->unp_srca_bank ^= 1;
+            } else {
+                tt->srcb_dvalid[tt->unp_srcb_bank] = true;
+                tt->unp_srcb_bank ^= 1;
+            }
+        }
+
+        return true;
+    }
+
+    /* --- Non-ZEROSRC modes: dispatch by full mode bits[2:0] --- */
+    uint32_t mode = imm & 0x7;
+
+    /* OverlayClear / SETREG: upper bits repurposed, skip field processing */
+    if (mode == 0x0 || mode == 0x3 || mode == 0x4) {
+        TT_DBG("[UNPACR_NOP] mode=0x%x (SETREG/OverlayClear, not implemented)\n", mode);
+        return true;
+    }
+
+    /* NOP (mode 0x2): no effect */
+    if (mode == 0x2) {
+        return true;
+    }
+
+    /* SETDVALID (mode 0x7): give bank to matrix unit + flip bank.
+     * Per doc: NO stall wait, NO data clearing. */
+    if (mode == 0x7) {
+        if (which_unp == 0) {
+            tt->srca_dvalid[tt->unp_srca_bank] = true;
+            tt->unp_srca_bank ^= 1;
+        } else {
+            tt->srcb_dvalid[tt->unp_srcb_bank] = true;
+            tt->unp_srcb_bank ^= 1;
+        }
+        return true;
+    }
+
+    /* Unknown mode (0x6, etc.) */
+    TT_DBG("[UNPACR_NOP] unknown mode=0x%x\n", mode);
+    return true;
+}
 static bool ttrstdma(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid; return true; }
 static bool ttsetdmareg(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_SETDMAREG(Payload_SigSelSize, Payload_SigSel, SetSignalsMode, RegIndex16b)
@@ -1724,10 +1935,14 @@ static bool ttsetdvalid(tensix_t *tt, uint32_t imm, int tid) {
      *      bit1=FlipSrcB - give unpacker's SrcB bank to MatrixUnit
      */
     uint32_t setvalid = imm & 0x3;
-    if (setvalid & 0x1)  /* FlipSrcA */
-        tt->srca_dvalid = true;
-    if (setvalid & 0x2)  /* FlipSrcB */
-        tt->srcb_dvalid = true;
+    if (setvalid & 0x1) { /* FlipSrcA: give unpacker bank to math */
+        tt->srca_dvalid[tt->unp_srca_bank] = true;
+        tt->unp_srca_bank ^= 1;
+    }
+    if (setvalid & 0x2) { /* FlipSrcB */
+        tt->srcb_dvalid[tt->unp_srcb_bank] = true;
+        tt->unp_srcb_bank ^= 1;
+    }
     return true;
 }
 /* Helper: decode common DMA-reg ALU encoding.
@@ -3000,6 +3215,7 @@ static bool ttsetc16(tensix_t *tt, uint32_t imm, int tid) {
     if (cfg_index < THD_REG_COUNT) {
         tt->thd_reg[tid][cfg_index] = value;
     }
+
     return true;
 }
 /* RMWCIB helper: Read-Modify-Write Configuration Interface Block

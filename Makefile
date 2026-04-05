@@ -46,6 +46,11 @@ check_rv32emu:
 $(TARGET): $(OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^
 
+# Header dependencies for tt_cop sources
+TT_COP_HEADERS = tt_cop/tensix.h tt_cop/tensix_cop.h
+$(TT_COP_SRCS:.c=.o): $(TT_COP_HEADERS)
+rv32sim.o: $(TT_COP_HEADERS)
+
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 

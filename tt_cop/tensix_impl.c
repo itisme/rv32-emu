@@ -22,12 +22,14 @@
 int tt_log_level = TT_LOG_WARN;
 
 /* Initialize tensix coprocessor */
+
 void tensix_init(tensix_t *tt,
                  uint8_t *l1_scratchpad_mem,
                  uint8_t *high_mem,
                  uint8_t *t0_ldm,
                  uint8_t *t1_ldm,
-                 uint8_t *t2_ldm)
+                 uint8_t *t2_ldm,
+                 uint16_t noc_xy)
 {
     if (!tt) {
         TT_ERR("Error: tensix_init called with NULL pointer\n");
@@ -36,6 +38,8 @@ void tensix_init(tensix_t *tt,
 
     /* Clear tensix state */
     memset(tt, 0, sizeof(tensix_t));
+
+    tt->noc_xy = noc_xy;
 
     /* Store memory pointers */
     tt->mem.l1_scratchpad = l1_scratchpad_mem;
@@ -91,8 +95,12 @@ void tensix_init(tensix_t *tt,
     memset(tt->srcb, 0, sizeof(tt->srcb));
     memset(tt->dest, 0, sizeof(tt->dest));
 
-    tt->srca_dvalid = false;
-    tt->srcb_dvalid = false;
+    tt->srca_dvalid[0] = tt->srca_dvalid[1] = false;
+    tt->srcb_dvalid[0] = tt->srcb_dvalid[1] = false;
+    tt->unp_srca_bank = 0;
+    tt->unp_srcb_bank = 0;
+    tt->math_srca_bank = 0;
+    tt->math_srcb_bank = 0;
     tt->dest_dvalid = false;
     tt->pack_l1_write_offset = 0;
     tt->pack_l1_dest_addr_raw = 0;
@@ -235,8 +243,12 @@ void tensix_reset(tensix_t *tt)
     memset(tt->srca, 0, sizeof(tt->srca));
     memset(tt->srcb, 0, sizeof(tt->srcb));
     memset(tt->dest, 0, sizeof(tt->dest));
-    tt->srca_dvalid = false;
-    tt->srcb_dvalid = false;
+    tt->srca_dvalid[0] = tt->srca_dvalid[1] = false;
+    tt->srcb_dvalid[0] = tt->srcb_dvalid[1] = false;
+    tt->unp_srca_bank = 0;
+    tt->unp_srcb_bank = 0;
+    tt->math_srca_bank = 0;
+    tt->math_srcb_bank = 0;
     tt->dest_dvalid = false;
     tt->pack_l1_write_offset = 0;
     tt->pack_l1_dest_addr_raw = 0;

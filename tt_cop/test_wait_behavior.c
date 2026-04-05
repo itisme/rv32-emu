@@ -8,6 +8,7 @@
 #include <assert.h>
 #include "tensix.h"
 #include "tensix_cop.h"
+#include "../rv32sim.h"
 
 int main(void)
 {
@@ -23,7 +24,7 @@ int main(void)
     uint8_t *t2_ldm = calloc(1, 0x4000);
 
     tensix_t *tt = calloc(1, sizeof(tensix_t));
-    tensix_init(tt, l1_mem, high_mem, t0_ldm, t1_ldm, t2_ldm);
+    tensix_init(tt, l1_mem, high_mem, t0_ldm, t1_ldm, t2_ldm, 0);
 
     printf("Scenario: trisc pushes a batch of instructions, hits Wait, can it auto-resume after condition is met?\n\n");
 
