@@ -37,6 +37,14 @@ void *mpool_calloc(struct mpool *mp);
 void mpool_free(struct mpool *mp, void *target);
 
 /**
+ * mpool_refresh_all - reset all chunks in every area back to the free list
+ * without releasing any allocated memory.  Equivalent to freeing every chunk
+ * at once; subsequent allocations reuse the existing pages.
+ * @mp: a pointer points to the target memory pool
+ */
+void mpool_refresh_all(struct mpool *mp);
+
+/**
  * mpool_destroy - destroy a memory pool
  * @mp: a pointer points to the target memory pool
  */

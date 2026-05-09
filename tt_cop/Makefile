@@ -8,7 +8,8 @@ TEST_CFLAGS = -O0 -g -Wall -Wextra -std=c11 -I../rv32emu/src
 # Source files for tt_cop library
 SRCS = tensix_impl.c \
        tensix_cop.c \
-       tt_insn.c
+       tt_insn.c \
+       mailbox.c
 
 # Object files
 OBJS = $(SRCS:.c=.o)
@@ -28,9 +29,10 @@ build: $(OBJS)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Dependencies (io.h from rv32emu/src via -I flag)
-tensix_impl.o: tensix_impl.c tensix.h tensix_cop.h
+tensix_impl.o: tensix_impl.c tensix.h tensix_cop.h mailbox.h
 tensix_cop.o: tensix_cop.c tensix_cop.h tensix.h
 tt_insn.o: tt_insn.c tensix.h
+mailbox.o: mailbox.c mailbox.h tensix.h
 
 # Build test programs
 test_ttcop: test_ttcop.c $(OBJS)

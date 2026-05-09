@@ -13,6 +13,7 @@
 #include "rv32emu/src/riscv.h"
 #include "rv32emu/src/riscv_private.h"
 #include "rv32sim.h"
+#include "tt_cop/mailbox.h"
 
 #define CYCLE_PER_STEP 10
 
@@ -51,6 +52,14 @@ void rv32_run_co(rv32_cpu_t handle, int max_instructions, void (*yield_cb)(void 
 
     while (!rv_has_halted(rv)) {
         rv_step(rv);
+
+        /* Mailbox stall: do_lw_mailbox already set rv->PC to the stalling LW.
+         * Don't overwrite with pc_before (block start). Just force a yield so
+         * other cores get to run and fill the FIFO. */
+        if (rv->tensix && mailbox_process(rv->tensix, rv->core_id)) {
+            instructions_executed = max_instructions;  /* trigger normal yield */
+        }
+
         instructions_executed++;
         if(instructions_executed >= max_instructions) {
             (*yield_cb)(cb_arg0, cb_arg1);
@@ -75,7 +84,7 @@ uint32_t rv32_get_pc(rv32_cpu_t handle) {
 void rv32_destroy(rv32_cpu_t cpu) {
     riscv_t *rv = (riscv_t *)cpu;
     vm_attr_t *attr = PRIV(rv);
-    free(attr->mem);
+    rv_delete(rv);   /* frees block_map, mpools, and rv itself */
+    free(attr->mem); /* memory_delete is no-op for external mem; free memory_t struct */
     free(attr);
-    rv_delete(cpu);
 }

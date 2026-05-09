@@ -63,26 +63,29 @@ static void block_map_init(block_map_t *map, const uint8_t bits)
 /* clear all block in the block map */
 void block_map_clear(riscv_t *rv)
 {
+#if RV32_HAS(EXT_TT)
+    fprintf(stderr, "[BLOCK-CLEAR] core_id=%d PC=0x%x\n", rv->core_id, rv->PC);
+#endif
     block_map_t *map = &rv->block_map;
     for (uint32_t i = 0; i < map->block_capacity; i++) {
         block_t *block = map->map[i];
         if (!block)
             continue;
 
-        uint32_t idx;
-        rv_insn_t *ir, *next;
-        for (idx = 0, ir = block->ir_head; idx < block->n_insn;
-             idx++, ir = next) {
+        rv_insn_t *ir = block->ir_head;
+        for (uint32_t idx = 0; idx < block->n_insn; idx++, ir = ir->next) {
             free(ir->fuse);
             free(ir->branch_table);
-            next = ir->next;
-            mpool_free(rv->block_ir_mp, ir);
         }
-        mpool_free(rv->block_mp, block);
         map->map[i] = NULL;
     }
     map->size = 0;
+
+    /* Bulk-reset both mpools instead of freeing chunks one by one. */
+    mpool_refresh_all(rv->block_ir_mp);
+    mpool_refresh_all(rv->block_mp);
 }
+
 
 static void block_map_destroy(riscv_t *rv)
 {
@@ -200,8 +203,8 @@ static riscv_word_t on_mem_read_w(riscv_t *rv, riscv_word_t addr)
     uint32_t result;
     if (rv->tensix && tensix_mmio_read(rv->tensix, rv->core_id, addr, &result))
         return result;
-
-    return memory_read_w(PRIV(rv)->mem, addr);
+    result = memory_read_w(PRIV(rv)->mem, addr);
+    return result;
 }
 #else
 IO_HANDLER_IMPL(word, read_w, R)
@@ -223,7 +226,18 @@ static void on_mem_write_w(riscv_t *rv, riscv_word_t addr, riscv_word_t data)
 IO_HANDLER_IMPL(word, write_w, W)
 #endif
 
+#if RV32_HAS(EXT_TT)
+/* Track half-word writes by TRISC0 to L1 local area (catches tiles_acked updates) */
+static void on_mem_write_s(riscv_t *rv, riscv_word_t addr, riscv_half_t data)
+{
+    if (rv->core_id == 0 && addr >= 0xffb00000 && addr < 0xffb10000)
+        fprintf(stderr, "[DBG:TILES_ACKD_W] core=%d PC=0x%05x addr=0x%x val=0x%x\n",
+                rv->core_id, rv->PC, addr, (uint32_t)(uint16_t)data);
+    memory_write_s(PRIV(rv)->mem, addr, (uint8_t *) &data);
+}
+#else
 IO_HANDLER_IMPL(half, write_s, W)
+#endif
 IO_HANDLER_IMPL(byte, write_b, W)
 
 #undef R

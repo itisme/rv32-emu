@@ -165,6 +165,33 @@ void mpool_free(mpool_t *mp, void *target)
     mp->chunk_count++;
 }
 
+void mpool_refresh_all(mpool_t *mp)
+{
+    size_t pool_size = mp->page_count * getpagesize();
+    size_t chunk_count_per_area =
+        pool_size / (sizeof(memchunk_t) + mp->chunk_size);
+
+    /* Walk every area, rebuild its internal free-list, and chain the last
+     * chunk of each area to the first chunk of the next area. */
+    mp->free_chunk_head = (memchunk_t *) mp->area.mapped;
+    mp->chunk_count = 0;
+
+    area_t *area = &mp->area;
+    while (area) {
+        memchunk_t *cur = (memchunk_t *) area->mapped;
+        mp->chunk_count += chunk_count_per_area;
+
+        for (size_t i = 0; i < chunk_count_per_area - 1; i++) {
+            cur->next = (memchunk_t *) ((char *) cur +
+                                        sizeof(memchunk_t) + mp->chunk_size);
+            cur = cur->next;
+        }
+        /* Link tail of this area to head of next area (or NULL if last). */
+        cur->next = area->next ? (memchunk_t *) area->next->mapped : NULL;
+        area = area->next;
+    }
+}
+
 void mpool_destroy(mpool_t *mp)
 {
 #if HAVE_MMAP

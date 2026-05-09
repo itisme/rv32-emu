@@ -757,6 +757,56 @@ void tensix_cop_execute_old(tensix_cop_t *cop, int thread_id, uint32_t insn)
         break;
     }
 
+    /* ISA Semaphore Instructions (bit-mask style, different from 0xB0-0xB2 direct-id style) */
+    case 0xA3: /* SEMINIT - Initialize semaphores by bit mask */
+    {
+        /* bits[14:2]  = sem_sel (bit mask, bit i selects sem[i])
+         * bits[19:15] = init_val
+         * bits[23:20] = max_val */
+        uint32_t sem_mask = (param >> 2) & 0x1FFF;
+        uint32_t init_val = (param >> 15) & 0x1F;
+        uint32_t max_val  = (param >> 20) & 0xF;
+        TT_DBG("[SEMINIT] param=0x%06x sem_mask=0x%x init=%d max=%d\n",
+               param, sem_mask, init_val, max_val);
+        for (int i = 0; i < 8; i++) {
+            if (sem_mask & (1 << i)) {
+                core->sem[i]     = init_val;
+                core->sem_max[i] = max_val;
+            }
+        }
+        break;
+    }
+
+    case 0xA4: /* SEMPOST - Increment semaphores by bit mask */
+    {
+        uint32_t sem_mask = (param >> 2) & 0x1FFF;
+        TT_DBG("[SEMPOST] param=0x%06x sem_mask=0x%x\n", param, sem_mask);
+        for (int i = 0; i < 8; i++) {
+            if (sem_mask & (1 << i)) {
+                if (core->sem[i] < core->sem_max[i]) {
+                    core->sem[i]++;
+                }
+                TT_DBG("[SEMPOST] sem[%d]=%d (max=%d)\n", i, core->sem[i], core->sem_max[i]);
+            }
+        }
+        break;
+    }
+
+    case 0xA5: /* SEMGET - Decrement semaphores by bit mask */
+    {
+        uint32_t sem_mask = (param >> 2) & 0x1FFF;
+        TT_DBG("[SEMGET] param=0x%06x sem_mask=0x%x\n", param, sem_mask);
+        for (int i = 0; i < 8; i++) {
+            if (sem_mask & (1 << i)) {
+                if (core->sem[i] > 0) {
+                    core->sem[i]--;
+                }
+                TT_DBG("[SEMGET] sem[%d]=%d\n", i, core->sem[i]);
+            }
+        }
+        break;
+    }
+
     /* T1 Thread Instructions */
     case 0xB0: /* TTSEMINIT - Semaphore Initialize */
     {
@@ -1018,12 +1068,14 @@ bool tensix_cop_step(tensix_cop_t *cop, int core_id)
      * UNPACR auto-waits for target bank to be owned by Unpackers (dvalid == false).
      * This is the key synchronization mechanism for T0(unpacr)<->T1(math)->T2(pacr) pipeline.
      */
-    if (insn_needs_srca(opcode) && !cop->core->srca_dvalid[cop->core->math_srca_bank]) {        thread->current_insn = insn;
+    if (insn_needs_srca(opcode) && !cop->core->srca_dvalid[cop->core->math_srca_bank]) {        
+        thread->current_insn = insn;
         thread->has_current_insn = true;
         thread->state = THREAD_STATE_WAITING;
         return false;
     }
-    if (insn_needs_srcb(opcode) && !cop->core->srcb_dvalid[cop->core->math_srcb_bank]) {        thread->current_insn = insn;
+    if (insn_needs_srcb(opcode) && !cop->core->srcb_dvalid[cop->core->math_srcb_bank]) {        
+        thread->current_insn = insn;
         thread->has_current_insn = true;
         thread->state = THREAD_STATE_WAITING;
         return false;
@@ -1041,12 +1093,14 @@ bool tensix_cop_step(tensix_cop_t *cop, int core_id)
      */
     if (opcode == OPCODE_UNPACR) {
         uint32_t which_unp = (insn >> 23) & 0x1;
-        if (which_unp == 0 && cop->core->srca_dvalid[cop->core->unp_srca_bank]) {            thread->current_insn = insn;
+        if (which_unp == 0 && cop->core->srca_dvalid[cop->core->unp_srca_bank]) {            
+            thread->current_insn = insn;
             thread->has_current_insn = true;
             thread->state = THREAD_STATE_WAITING;
             return false;
         }
-        if (which_unp == 1 && cop->core->srcb_dvalid[cop->core->unp_srcb_bank]) {            thread->current_insn = insn;
+        if (which_unp == 1 && cop->core->srcb_dvalid[cop->core->unp_srcb_bank]) {            
+            thread->current_insn = insn;
             thread->has_current_insn = true;
             thread->state = THREAD_STATE_WAITING;
             return false;
@@ -1180,6 +1234,9 @@ bool tensix_cop_step_direct(tensix_cop_t *cop, int core_id)
      * through this direct path.  In real hardware they share a single pipeline
      * and STALLWAIT enforces ordering.  We must drain the FIFO here so that
      * e.g. SETDMAREG updates dma_reg[] before a subsequent WRCFG reads it.
+     *
+     * The drain loop is bounded (at most FIFO_SIZE steps) and never waits for
+     * external state — safe to call from a coroutine.
      */
     while (tensix_cop_step(cop, core_id))
         ;
@@ -1242,7 +1299,8 @@ bool tensix_cop_step_direct(tensix_cop_t *cop, int core_id)
 
         /* Check if instruction matches BlockMask */
         if (insn_block_bits & thread->wait_gate.block_mask) {
-            if (!wait_gate_check(cop, core_id)) {
+            bool gate_ok = wait_gate_check(cop, core_id);
+            if (!gate_ok) {
                 /* Conditions not met, instruction is blocked */
                 thread->state = THREAD_STATE_WAITING;
                 thread->cycles_waiting++;
@@ -1524,6 +1582,14 @@ static bool drain_replay_expansion(tensix_cop_t *cop, int core_id)
         }
 
         if (core->replay_expand_current[core_id] >= core->replay_expand_count[core_id]) {
+            {
+                static int rpl_dbg = 4;
+                if (rpl_dbg > 0) {
+                    fprintf(stderr, "[DBG:REPLAY:DONE] core=%d replayed %u/%u insns\n",
+                            core_id, core->replay_expand_current[core_id], core->replay_expand_count[core_id]);
+                    rpl_dbg--;
+                }
+            }
             core->replay_expanding[core_id] = false;
             return true;
         }
@@ -1559,6 +1625,7 @@ static bool mop_continue_execution(tensix_cop_t *cop, int core_id)
         if (!tensix_cop_step(cop, core_id)) {
             return false;  /* Still blocked */
         }
+        thread->has_current_insn = false;
         /* After executing, check for new replay expansion */
         if (cop->core->replay_expanding[core_id]) {
             if (!drain_replay_expansion(cop, core_id))
@@ -1605,13 +1672,18 @@ void tensix_cop_mop_expand(tensix_cop_t *cop, int core_id, uint32_t param)
     memset(st, 0, sizeof(*st));
     st->active = true;
     st->tmpl = tmpl;
+    thread->has_current_insn = false;
 
-    /* [DEBUG-OFF] MOP templates are fixed per thread, print once only */
-    /*
-    fprintf(stderr, "[MOP-EXPAND] core=%d tmpl=%d param=0x%06x cfg=[0x%x,0x%x,0x%x,0x%x,0x%x,0x%x,0x%x,0x%x,0x%x]\n",
-            core_id, tmpl, param,
-            cfg[0], cfg[1], cfg[2], cfg[3], cfg[4], cfg[5], cfg[6], cfg[7], cfg[8]);
-    */
+    /* [DEBUG] MOP expand */
+    {
+        static int mop_dbg = 4;
+        if (mop_dbg > 0 && tmpl == 1) {
+            fprintf(stderr, "[DBG:MOP-EXPAND] core=%d tmpl=%d param=0x%06x cfg=[0x%x,0x%x,0x%x,0x%x,0x%x,0x%x,0x%x,0x%x,0x%x]\n",
+                    core_id, tmpl, param,
+                    cfg[0], cfg[1], cfg[2], cfg[3], cfg[4], cfg[5], cfg[6], cfg[7], cfg[8]);
+            mop_dbg--;
+        }
+    }
 
     if (tmpl == 0) {
         uint32_t count1 = (param >> 16) & 0x7F;

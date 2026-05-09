@@ -243,6 +243,7 @@ struct riscv_internal {
 #if RV32_HAS(EXT_TT)
     tensix_t * tensix;
     int core_id;
+    uint32_t pre_pc;  /* PC before last block, for firmware→kernel transition detection */
 #endif
 };
 

@@ -17,6 +17,7 @@
 
 #include "tensix.h"
 #include "tensix_cop.h"
+#include "mailbox.h"
 
 /* Default log level: only errors and warnings */
 int tt_log_level = TT_LOG_WARN;
@@ -54,6 +55,14 @@ void tensix_init(tensix_t *tt,
         tt->sem[i] = 0;
         tt->sem_max[i] = 0;
     }
+    /* Default semaphore max values matching hardware/LLK boot.h defaults.
+     * These can be overridden by TTI_SEMINIT in firmware.
+     * sem[2] = UNPACK_TO_DEST: max=1 (T0 posts after unpack, T1 gets before math)
+     * sem[4] = PACK_DONE:      max=1
+     * sem[7] = MATH_DONE:      max=1 (T1 posts after math, T1 gets after pack signals) */
+    tt->sem_max[2] = 1;  /* UNPACK_TO_DEST */
+    tt->sem_max[4] = 1;  /* PACK_DONE */
+    tt->sem_max[7] = 1;  /* MATH_DONE */
 
     /* Initialize thread registers */
     for (int t = 0; t < 3; t++) {
@@ -313,6 +322,11 @@ bool tensix_mmio_read(tensix_t *tt, int core_id, uint32_t addr, uint32_t *result
         return false;
     }
 
+    /* Mailbox read: 0xFFEC0000 - 0xFFEC3FFF */
+    if (addr >= 0xFFEC0000 && addr <= 0xFFEC3FFF) {
+        return mailbox_read(tt, core_id, addr, result);
+    }
+
     /* Semaphore read: 0xFFE80020 - 0xFFE8003F (8 semaphores × 4 bytes)
      * Mapping: pc_buf_base[PC_BUF_SEMAPHORE_BASE + i] = 0xFFE80000 + (8+i)*4 = 0xFFE80020 + i*4
      * This is the CRITICAL fix: RISC-V firmware polls these addresses to read semaphore values.
@@ -402,6 +416,14 @@ bool tensix_mmio_write(tensix_t *tt, int core_id, uint32_t addr, uint32_t data)
                is_per_core_addr(addr) && core_id >= 0 && core_id <= 2);
     }
 
+    /* Mailbox write: 0xFFEC0000 - 0xFFEC3FFF
+     * Push to FIFO but also let normal memory write proceed (return false),
+     * because other code may read from mem_high directly. */
+    if (addr >= 0xFFEC0000 && addr <= 0xFFEC3FFF) {
+        mailbox_write(tt, core_id, addr, data);
+        return false;  /* also write to mem_high */
+    }
+
     /* Semaphore write: 0xFFE80020 - 0xFFE8003F (8 semaphores × 4 bytes)
      * RISC-V firmware uses semaphore_post(i) = write 0, semaphore_get(i) = write 1.
      * Route these to tt->sem[] so the coprocessor Wait Gate sees the changes.
@@ -454,39 +476,52 @@ bool tensix_mmio_write(tensix_t *tt, int core_id, uint32_t addr, uint32_t data)
     if (addr >= 0xFFE40000 && addr <= 0xFFE6FFFF) {
         if (!tt) return true;
 
+        int target_thread = -1;
+
         if (addr <= 0xFFE4FFFF) {
             /* INSTRN_BUF_BASE */
-            if (core_id >= 0 && core_id <= 2) {
-                /* Trisc0/1/2: push to own thread */
-                while (!tensix_push(tt, data, core_id))
-                    tensix_step(tt, core_id);
-            } else if (core_id == -1) {
-                /* Brisc: push to t0 */
-                while (!tensix_push(tt, data, 0))
-                    tensix_step(tt, 0);
-            } else {
-                /* NCrisc or invalid core_id: cannot push instructions */
+            if (core_id >= 0 && core_id <= 2)
+                target_thread = core_id;       /* Trisc: push to own thread */
+            else if (core_id == -1)
+                target_thread = 0;             /* Brisc: push to t0 */
+            else
                 TT_WARN("[MMIO_WRITE_ERROR] core_id=%d attempted to write INSTRN_BUF_BASE, ignoring\n", core_id);
-            }
         } else if (addr <= 0xFFE5FFFF) {
-            /* INSTRN1_BUF_BASE */
-            if (core_id == -1) {
-                /* Brisc: push to t1 */
-                while (!tensix_push(tt, data, 1))
-                    tensix_step(tt, 1);
-            } else if (core_id >= 0 && core_id <= 2) {
-                /* Trisc0/1/2: will hang in real hardware */
+            if (core_id == -1)
+                target_thread = 1;             /* Brisc: push to t1 */
+            else if (core_id >= 0 && core_id <= 2)
                 TT_WARN("[MMIO_WRITE_ERROR] core_id=%d (Trisc) attempted to write INSTRN1_BUF_BASE, would hang in real hardware\n", core_id);
-            }
         } else {
-            /* INSTRN2_BUF_BASE */
-            if (core_id == -1) {
-                /* Brisc: push to t2 */
-                while (!tensix_push(tt, data, 2))
-                    tensix_step(tt, 2);
-            } else if (core_id >= 0 && core_id <= 2) {
-                /* Trisc0/1/2: will hang in real hardware */
+            if (core_id == -1)
+                target_thread = 2;             /* Brisc: push to t2 */
+            else if (core_id >= 0 && core_id <= 2)
                 TT_WARN("[MMIO_WRITE_ERROR] core_id=%d (Trisc) attempted to write INSTRN2_BUF_BASE, would hang in real hardware\n", core_id);
+        }
+
+        if (target_thread >= 0) {
+            /* Drain COP FIFO until there is room, then push.
+             * The loop is bounded (FIFO_SIZE steps max) — safe in a coroutine.
+             * If the COP is blocked (dvalid / WaitGate) and the FIFO is full,
+             * that means firmware pushed more instructions than the COP can
+             * buffer while waiting: this should never happen with correct
+             * firmware + correct dvalid/WaitGate emulation. */
+            while (!tensix_push(tt, data, target_thread)) {
+                if (!tensix_step(tt, target_thread)) {
+                    /* FIFO full AND COP blocked — firmware/emulation bug.
+                     * We cannot spin-wait (coroutine constraint) and we cannot
+                     * silently drop instructions.  Assert to enter debug state. */
+                    tensix_thread_cop_t *thr = &tt->cop->threads[target_thread];
+                    fprintf(stderr,
+                        "[BUG] INSTRN_BUF: core=%d target=%d FIFO full+blocked"
+                        " insn=0x%08x fifo_count=%d",
+                        core_id, target_thread, data,
+                        tensix_cop_fifo_count(tt->cop, target_thread));
+                    if (thr->has_current_insn)
+                        fprintf(stderr, " blocked_op=0x%02x",
+                                (thr->current_insn >> 24) & 0xFF);
+                    fprintf(stderr, "\n");
+                    assert(0 && "INSTRN_BUF FIFO full and COP blocked");
+                }
             }
         }
         return true;
@@ -521,13 +556,302 @@ bool tensix_mmio_write(tensix_t *tt, int core_id, uint32_t addr, uint32_t data)
      */
     if (addr >= 0xFFEF0000 && addr <= 0xFFEFFFFF) {
         uint32_t reg_idx = (addr - 0xFFEF0000) / 4;
+        if (reg_idx == 72 || reg_idx == 76 || reg_idx == 77)
+            fprintf(stderr, "[CFG:MMIO_WRITE] noc=0x%x core=%d cfg[%u]=0x%x\n",
+                    tt ? tt->noc_xy : 0, core_id, reg_idx, data);
         if (reg_idx == 76 || reg_idx == 92 || reg_idx == 124 || reg_idx == 140 ||
             (reg_idx >= 64 && reg_idx <= 67) || (reg_idx >= 112 && reg_idx <= 115)) {
             TT_DBG("[CFG_MMIO] core=%d, cfg[%d] = 0x%x (addr=0x%x)\n",
                    core_id, reg_idx, data, addr);
         }
+        /* Reset pack L1 write offset when L1_Dest_addr (cfg[69]) is written */
+        if (reg_idx == 69) {
+            tt->pack_l1_write_offset = 0;
+            fprintf(stderr, "[DBG:MMIO:CFG69] noc=0x%x reg_idx=69 val=0x%08x\n",
+                    tt->noc_xy, data);
+        }
+        /* PRNG seed: cfg[186] (PRNG_SEED_Seed_Val_ADDR32) or cfg[186+224] (bank 1) */
+        if (reg_idx == 186 || reg_idx == (186 + 224)) {
+            for (int lane = 0; lane < 32; lane++)
+                tt->prng_state[lane] = data + lane;
+        }
         return false; /* normal memory write to high_mem */
     }
 
     return false;
+}
+
+/* ============================================================================
+ * tensix_clear: reset per-kernel state when all cores return to firmware.
+ * Called from emulate.c when the last core exits kernel space (PC < 0xa000).
+ * ============================================================================ */
+void tensix_clear(tensix_t *tt)
+{
+    if (!tt)
+        return;
+
+    {
+        uint32_t c72 = tensix_read_cfg(&tt->mem, 72);
+        uint32_t c76 = tensix_read_cfg(&tt->mem, 76);
+        uint32_t c77 = tensix_read_cfg(&tt->mem, 77);
+        fprintf(stderr, "[TENSIX_CLEAR] resetting per-kernel state cfg[72]=0x%x cfg[76]=0x%x cfg[77]=0x%x\n",
+                c72, c76, c77);
+    }
+
+    /* Save fields that must survive the wipe */
+    tensix_memory_t saved_mem    = tt->mem;
+    tensix_cop_t   *saved_cop    = tt->cop;
+    uint16_t        saved_noc_xy = tt->noc_xy;
+    uint8_t         saved_cores  = tt->cores_in_kernel;
+    /* sem_max is written by firmware at device init and not re-written
+     * before each kernel; preserve it across clears. */
+    uint32_t saved_sem_max[8];
+    for (int i = 0; i < 8; i++) saved_sem_max[i] = tt->sem_max[i];
+
+    /* Wipe all runtime state (mop_templ_0/1 contain only unused TemplateOp
+     * function pointer fields — verified no .c code references them) */
+    memset(tt, 0, sizeof(*tt));
+
+    /* Restore structural / persistent fields */
+    tt->mem             = saved_mem;
+    tt->cop             = saved_cop;
+    tt->noc_xy          = saved_noc_xy;
+    tt->cores_in_kernel = saved_cores;
+    for (int i = 0; i < 8; i++) tt->sem_max[i] = saved_sem_max[i];
+
+    /* Restore non-zero initial values */
+    for (int i = 0; i < 8; i++)
+        tt->mutex[i] = MUTEX_NONE;  /* 0xFF */
+    tt->flag_stack_top = -1;
+    tt->neginf = -__builtin_inff();
+
+    /* Reset entire COP struct, preserving structural/callback fields */
+    if (saved_cop) {
+        tensix_t   *saved_core       = saved_cop->core;
+        void       *saved_mem_ctx    = saved_cop->mem_ctx;
+        uint32_t  (*saved_mem_read )(void *, uint32_t, uint32_t)
+                                     = saved_cop->mem_read_fn;
+        void      (*saved_mem_write)(void *, uint32_t, uint32_t, uint32_t)
+                                     = saved_cop->mem_write_fn;
+
+        /* mop_cfg and zmask_hi16 are hardware registers that persist across
+         * kernel dispatches on real hardware — preserve them across clears. */
+        uint32_t saved_mop_cfg[3][9];
+        uint32_t saved_zmask_hi16[3];
+        for (int t = 0; t < 3; t++) {
+            for (int i = 0; i < 9; i++)
+                saved_mop_cfg[t][i] = saved_cop->threads[t].mop_cfg[i];
+            saved_zmask_hi16[t] = saved_cop->threads[t].zmask_hi16;
+        }
+
+        memset(saved_cop, 0, sizeof(*saved_cop));
+
+        saved_cop->core         = saved_core;
+        saved_cop->mem_ctx      = saved_mem_ctx;
+        saved_cop->mem_read_fn  = saved_mem_read;
+        saved_cop->mem_write_fn = saved_mem_write;
+        for (int t = 0; t < 3; t++) {
+            for (int i = 0; i < 9; i++)
+                saved_cop->threads[t].mop_cfg[i] = saved_mop_cfg[t][i];
+            saved_cop->threads[t].zmask_hi16 = saved_zmask_hi16[t];
+        }
+    }
+
+    /* Clear high_mem (0xFFB00000-0xFFEFFFFF, 6MB), preserving CFG registers.
+     * On real hardware, CFG registers persist across kernel dispatches —
+     * firmware uses a one-time init guard and relies on CFG values surviving.
+     * Stream overlay, mailbox backing store, and other MMIO state are reset. */
+    if (saved_mem.high_mem) {
+        uint32_t cfg_start = TENSIX_CFG_OFFSET_IN_HIGH_MEM;
+        uint32_t cfg_size  = CFG_REG_COUNT * 4;
+        uint32_t cfg_end   = cfg_start + cfg_size;
+        memset(saved_mem.high_mem, 0, cfg_start);
+        if (cfg_end < 0x600000)
+            memset(saved_mem.high_mem + cfg_end, 0, 0x600000 - cfg_end);
+    }
+
+}
+
+/* ============================================================================
+ * Debug: dump tensix state at kernel entry (called from emulate.c).
+ * Remove this function and its call site when debugging is done.
+ * ============================================================================ */
+void tensix_debug_dump_kernel_entry(tensix_t *tt)
+{
+    if (!tt || !tt->cop)
+        return;
+
+    tensix_cop_t *cop = tt->cop;
+    fprintf(stderr, "\n=== [TENSIX_STATE] kernel entry ===\n");
+
+    /* --- COP per-thread state --- */
+    for (int tid = 0; tid < 3; tid++) {
+        tensix_thread_cop_t *th = &cop->threads[tid];
+        tensix_fifo_t *fifo = &th->insn_fifo;
+        fprintf(stderr, "  T%d fifo=%u", tid, fifo->count);
+        if (fifo->count) {
+            fprintf(stderr, " [");
+            for (uint32_t i = 0; i < fifo->count; i++) {
+                uint32_t idx = (fifo->head + i) % TENSIX_FIFO_SIZE;
+                fprintf(stderr, "%s0x%08x", i ? "," : "", fifo->buffer[idx]);
+            }
+            fprintf(stderr, "]");
+        }
+        if (th->has_current_insn)
+            fprintf(stderr, " pending=0x%08x", th->current_insn);
+        if (th->wait_gate.active)
+            fprintf(stderr, " WAIT{op=0x%02x blk=0x%03x cond=0x%04x sem=0x%02x}",
+                    th->wait_gate.opcode, th->wait_gate.block_mask,
+                    th->wait_gate.condition_mask, th->wait_gate.semaphore_mask);
+        fprintf(stderr, "\n       mop_cfg=[");
+        for (int i = 0; i < 9; i++)
+            fprintf(stderr, "%s0x%08x", i ? "," : "", th->mop_cfg[i]);
+        fprintf(stderr, "] expand=%d zmask_hi=0x%x\n", th->mop_state.active, th->zmask_hi16);
+    }
+
+    /* --- Bank tracking --- */
+    fprintf(stderr, "  banks: unp_srca=%u unp_srcb=%u math_srca=%u math_srcb=%u"
+                    " last_unp_srca=%u mova2d_bank=%u(valid=%d)\n",
+            tt->unp_srca_bank, tt->unp_srcb_bank,
+            tt->math_srca_bank, tt->math_srcb_bank,
+            tt->last_unp_srca_bank,
+            tt->mova2d_latched_bank, tt->mova2d_bank_valid);
+
+    /* --- dvalid + dest_offset --- */
+    fprintf(stderr, "  dvalid: srca=[%d,%d] srcb=[%d,%d] srcb_zeroed=[%d,%d]"
+                    " dest=%d dest_offset=%u\n",
+            tt->srca_dvalid[0], tt->srca_dvalid[1],
+            tt->srcb_dvalid[0], tt->srcb_dvalid[1],
+            tt->srcb_zeroed[0], tt->srcb_zeroed[1],
+            tt->dest_dvalid, tt->dest_offset);
+
+    /* --- RWC counters + cfg_state_id + fidelity per thread --- */
+    for (int tid = 0; tid < 3; tid++) {
+        fprintf(stderr, "  T%d rwc: srca=%u srcb=%u dest=%u"
+                        " | cr: srca=%u srcb=%u dest=%u"
+                        " cfg_state_id=%u fidelity=%u\n",
+                tid,
+                tt->srca_rwc[tid], tt->srcb_rwc[tid], tt->dest_rwc[tid],
+                tt->srca_rwc_cr[tid], tt->srcb_rwc_cr[tid], tt->dest_rwc_cr[tid],
+                tt->cfg_state_id[tid], tt->fidelity[tid]);
+    }
+
+    /* --- thd_reg per thread (all, skip trailing zeros) --- */
+    for (int tid = 0; tid < 3; tid++) {
+        int last = -1;
+        for (int i = THD_REG_COUNT - 1; i >= 0; i--) {
+            if (tt->thd_reg[tid][i]) { last = i; break; }
+        }
+        if (last >= 0) {
+            fprintf(stderr, "  T%d thd_reg[0..%d]=[", tid, last);
+            for (int i = 0; i <= last; i++)
+                fprintf(stderr, "%s0x%x", i ? "," : "", tt->thd_reg[tid][i]);
+            fprintf(stderr, "]\n");
+        } else {
+            fprintf(stderr, "  T%d thd_reg=all_zero\n", tid);
+        }
+    }
+
+    /* --- ADC position counters per channel --- */
+    for (int tid = 0; tid < 3; tid++) {
+        AddrCtrl *a = &tt->adc[tid];
+        fprintf(stderr, "  T%d adc ch0=[x=%u y=%u z=%u w=%u]"
+                        " cr=[x=%u y=%u z=%u w=%u]"
+                        " ch1=[y=%u z=%u w=%u]\n",
+                tid,
+                a->ch0_x, a->ch0_y, a->ch0_z, a->ch0_w,
+                a->ch0_x_cr, a->ch0_y_cr, a->ch0_z_cr, a->ch0_w_cr,
+                a->ch1_y, a->ch1_z, a->ch1_w);
+    }
+
+    /* --- Semaphores + sem_math_pack + mutex --- */
+    fprintf(stderr, "  sem=[");
+    for (int i = 0; i < 8; i++)
+        fprintf(stderr, "%s%u", i ? "," : "", tt->sem[i]);
+    fprintf(stderr, "] sem_max=[");
+    for (int i = 0; i < 8; i++)
+        fprintf(stderr, "%s%u", i ? "," : "", tt->sem_max[i]);
+    fprintf(stderr, "] sem_math_pack=%u bias=%u\n", tt->sem_math_pack, tt->bias);
+
+    {
+        bool any = false;
+        for (int i = 0; i < 8; i++) if (tt->mutex[i]) { any = true; break; }
+        if (any) {
+            fprintf(stderr, "  mutex=[");
+            for (int i = 0; i < 8; i++)
+                fprintf(stderr, "%s%u", i ? "," : "", tt->mutex[i]);
+            fprintf(stderr, "]\n");
+        }
+    }
+
+    /* --- Pack state --- */
+    fprintf(stderr, "  pack: l1_write_offset=%u l1_dest_addr_raw=0x%x\n",
+            tt->pack_l1_write_offset, tt->pack_l1_dest_addr_raw);
+
+    /* --- Mailbox counts + stall --- */
+    {
+        bool any = false;
+        for (int s = 0; s < MAILBOX_CORES; s++)
+            for (int d = 0; d < MAILBOX_CORES; d++)
+                if (tt->mailbox_count[s][d]) { any = true; break; }
+        for (int i = 0; i < MAILBOX_CORES && !any; i++)
+            if (tt->mailbox_stall[i]) any = true;
+        if (any) {
+            for (int s = 0; s < MAILBOX_CORES; s++)
+                for (int d = 0; d < MAILBOX_CORES; d++)
+                    if (tt->mailbox_count[s][d])
+                        fprintf(stderr, "  mailbox[%d->%d] count=%d\n",
+                                s, d, tt->mailbox_count[s][d]);
+            fprintf(stderr, "  mailbox_stall=[%d,%d,%d,%d]\n",
+                    tt->mailbox_stall[0], tt->mailbox_stall[1],
+                    tt->mailbox_stall[2], tt->mailbox_stall[3]);
+        }
+    }
+
+    /* --- Replay state + first 8 buffer entries --- */
+    for (int tid = 0; tid < 3; tid++) {
+        fprintf(stderr, "  T%d replay: recording=%d expanding=%d"
+                        " count=%u cur=%u idx=%u left=%u",
+                tid,
+                tt->replay_recording[tid], tt->replay_expanding[tid],
+                tt->replay_expand_count[tid], tt->replay_expand_current[tid],
+                tt->replay_index[tid], tt->replay_left[tid]);
+        if (tt->replay_expand_count[tid]) {
+            uint32_t show = tt->replay_expand_count[tid] < 8
+                          ? tt->replay_expand_count[tid] : 8;
+            fprintf(stderr, " buf=[");
+            for (uint32_t i = 0; i < show; i++)
+                fprintf(stderr, "%s0x%08x", i ? "," : "", tt->replay_buffer[tid][i]);
+            if (tt->replay_expand_count[tid] > 8) fprintf(stderr, ",...");
+            fprintf(stderr, "]");
+        }
+        fprintf(stderr, "\n");
+    }
+
+    /* --- cfg_reg: print non-zero entries (bank 0 and bank 1) --- */
+    for (int bank = 0; bank < 2; bank++) {
+        bool hdr = false;
+        for (int i = 0; i < CFG_REG_COUNT; i++) {
+            if (tt->cfg_reg[bank][i]) {
+                if (!hdr) { fprintf(stderr, "  cfg_reg[bank%d]:", bank); hdr = true; }
+                fprintf(stderr, " [%d]=0x%x", i, tt->cfg_reg[bank][i]);
+            }
+        }
+        if (hdr) fprintf(stderr, "\n");
+    }
+
+    /* --- Binary snapshot: write entire tensix_t to file for external diff --- */
+    {
+        static int snap_count = 0;
+        char path[64];
+        snprintf(path, sizeof(path), "/tmp/tensix_snap_%d.bin", snap_count++);
+        FILE *f = fopen(path, "wb");
+        if (f) {
+            fwrite(tt, sizeof(*tt), 1, f);
+            fclose(f);
+            fprintf(stderr, "  [SNAP] wrote %s (%zu bytes)\n", path, sizeof(*tt));
+        }
+    }
+
+    fprintf(stderr, "=== [TENSIX_STATE end] ===\n\n");
 }

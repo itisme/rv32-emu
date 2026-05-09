@@ -27,7 +27,8 @@ RV32_SRCS = \
 TT_COP_SRCS = \
 	tt_cop/tensix_impl.c \
 	tt_cop/tensix_cop.c \
-	tt_cop/tt_insn.c
+	tt_cop/tt_insn.c \
+	tt_cop/mailbox.c
 
 SRCS = rv32sim.c $(RV32_SRCS) $(TT_COP_SRCS)
 OBJS = $(SRCS:.c=.o)
@@ -47,7 +48,7 @@ $(TARGET): $(OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^
 
 # Header dependencies for tt_cop sources
-TT_COP_HEADERS = tt_cop/tensix.h tt_cop/tensix_cop.h
+TT_COP_HEADERS = tt_cop/tensix.h tt_cop/tensix_cop.h tt_cop/mailbox.h
 $(TT_COP_SRCS:.c=.o): $(TT_COP_HEADERS)
 rv32sim.o: $(TT_COP_HEADERS)
 

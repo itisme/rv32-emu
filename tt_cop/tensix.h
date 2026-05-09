@@ -174,11 +174,11 @@ typedef enum DataFormat {
     Bfp4_b    = 7,
     Bfp2_b    = 15,
     Lf8       = 10,
-    UInt16    = 12,
+    UInt16    = 9,
     Int8      = 14,
     UInt8     = 30,
     Int32     = 8,
-    Int16     = 9,
+    Int16     = 12,
     Tf32      = 4,
     testMan7  = 0x82,       // intermediate format for testing: 7bit mantissa (6+hidden)
     testMan2  = 0x8A,       // intermediate format for testing: 2bit mantissa (2+hidden)
@@ -314,6 +314,8 @@ static inline uint32_t tensix_read_cfg(tensix_memory_t *mem, uint32_t reg_idx) {
 /* Write config register to high_mem (for WRCFG instruction) */
 static inline void tensix_write_cfg(tensix_memory_t *mem, uint32_t reg_idx, uint32_t value) {
     if (mem->high_mem && reg_idx < CFG_REG_COUNT) {
+        if (reg_idx == 72 || reg_idx == 76 || reg_idx == 77)
+            fprintf(stderr, "[CFG:WRITE] cfg[%u]=0x%x\n", reg_idx, value);
         *(uint32_t *)(mem->high_mem + TENSIX_CFG_OFFSET_IN_HIGH_MEM + reg_idx * 4) = value;
     }
 }
@@ -331,6 +333,9 @@ struct tensix {
     bool srca_dvalid[2];   /* per-bank: true=MatrixUnit owns, false=Unpacker owns */
     bool srcb_dvalid[2];
     bool srcb_zeroed[2];   /* true if bank was zeroed by ZEROSRC and not yet written by real UNPACR */
+
+    /* SFPU PRNG state (32 lanes, per VectorUnit.md) */
+    uint32_t prng_state[LREG_LANES];
     uint8_t unp_srca_bank; /* unpacker's current bank for SrcA */
     uint8_t unp_srcb_bank; /* unpacker's current bank for SrcB */
     uint8_t math_srca_bank; /* math unit's current bank for SrcA */
@@ -372,8 +377,8 @@ struct tensix {
     AddrCtrl adc[3];
 
     uint32_t mutex[8];
-    uint32_t sem[8];
-    uint32_t sem_max[8];
+    volatile uint32_t sem[8];
+    volatile uint32_t sem_max[8];
 
     uint32_t thread_id;          /* Deprecated: use tid parameter instead */
 
@@ -426,6 +431,25 @@ struct tensix {
     uint32_t replay_expand_start[3];  /* Per-thread: start index in replay buffer */
     uint32_t replay_expand_count[3];  /* Per-thread: total instructions to replay */
     uint32_t replay_expand_current[3];/* Per-thread: current replay position */
+
+    /* Mailbox FIFO queues: 4 cores (B,T0,T1,T2) x 4 targets = 16 FIFOs
+     * mailbox_fifo[src][dst][depth], each FIFO holds up to 4 uint32 values.
+     * Mailbox core IDs: 0=B, 1=T0, 2=T1, 3=T2 (no NCRISC) */
+#define MAILBOX_CORES 4
+#define MAILBOX_FIFO_DEPTH 4
+    uint32_t mailbox_fifo[MAILBOX_CORES][MAILBOX_CORES][MAILBOX_FIFO_DEPTH];
+    int mailbox_head[MAILBOX_CORES][MAILBOX_CORES];
+    int mailbox_count[MAILBOX_CORES][MAILBOX_CORES];
+
+    /* Stall flags: indexed by mailbox core index (0=B, 1=T0, 2=T1, 3=T2).
+     * The coroutine loop should rewind PC and yield when set. */
+    bool mailbox_stall[MAILBOX_CORES];  /* mailbox empty-pop or full-push */
+
+    /* Bitmask of cores currently executing in kernel space (PC >= 0xa000).
+     * Bits: BRISC(-1)=bit3, T0=bit0, T1=bit1, T2=bit2.
+     * tensix_clear() is called when the last core exits kernel space. */
+    uint8_t cores_in_kernel;
+
 
 };
 
@@ -485,5 +509,11 @@ bool tensix_mmio_write(tensix_t *tt, int core_id, uint32_t addr, uint32_t data);
 
 /* MMIO read handler (returns true if handled, value written to *result) */
 bool tensix_mmio_read(tensix_t *tt, int core_id, uint32_t addr, uint32_t *result);
+
+/* Clear per-kernel tensix state when all cores return to firmware. */
+void tensix_clear(tensix_t *tt);
+
+/* Debug: dump tensix state at kernel entry. Remove when debugging is done. */
+void tensix_debug_dump_kernel_entry(tensix_t *tt);
 
 #endif
