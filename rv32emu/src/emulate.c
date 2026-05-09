@@ -29,6 +29,10 @@ extern struct target_ops gdbstub_ops;
 #include "riscv_private.h"
 #include "utils.h"
 
+#if RV32_HAS(EXT_TT)
+#include "mailbox.h"
+#endif
+
 #if RV32_HAS(JIT)
 #include "cache.h"
 #include "jit.h"
@@ -452,6 +456,41 @@ static bool do_ttinsn(riscv_t *rv, const rv_insn_t *ir,
     rv->PC = PC;
     return false;
 }
+
+/* LW targeting a mailbox address (detected at block-translate time).
+ * Standalone handler like do_ttinsn: manages rv->PC explicitly and does not
+ * chain to ir->next (block always ends here due to break in block_translate).
+ * On empty FIFO: stall flag is set by mailbox_read; we set rv->PC = PC
+ * (the LW itself) and return false so rv32_run_co can yield and retry.
+ * On success: set rv->PC = PC + 4, return true. */
+static bool do_lw_mailbox(riscv_t *rv, const rv_insn_t *ir,
+                           uint64_t cycle, uint32_t PC)
+{
+    cycle++;
+    const uint32_t rs1_val = rv->X[ir->rs1]; /* save before potential rd overwrite */
+    const uint32_t addr = rs1_val + ir->imm;
+    fprintf(stderr, "[DBG:MBOX_ENTER] core=%d PC=0x%x addr=0x%x\n",
+            rv->core_id, PC, addr);
+    rv->X[ir->rd] = rv->io.mem_read_w(rv, addr);
+
+    int mci = mailbox_core_index(rv->core_id);
+    if (mci >= 0 && rv->tensix->mailbox_stall[mci]) {
+        /* FIFO was empty: mailbox_read set stall flag.
+         * Restore rs1 in case rs1==rd (e.g. lw a5,0(a5)) so the retry
+         * block (which may start at the LW, not the preceding LUI) still
+         * computes the correct address. */
+        rv->X[ir->rs1] = rs1_val;
+        rv->csr_cycle = cycle;
+        rv->PC = PC;
+        return false;
+    }
+
+    fprintf(stderr, "[DBG:MBOX_LW] core=%d PC=0x%x addr=0x%x rd=x%d val=0x%x\n",
+            rv->core_id, PC, addr, ir->rd, rv->X[ir->rd]);
+    rv->csr_cycle = cycle;
+    rv->PC = PC + 4;
+    return true;
+}
 #endif
 
 /* multiple LUI */
@@ -677,6 +716,11 @@ retranslate:
     block->ir_head = ir;
 
     /* translate the basic block */
+#if RV32_HAS(EXT_TT)
+    /* Track LUI-loaded constants per register for mailbox-LW detection.
+     * Index by register number (0-31). 0 means unknown/unset. */
+    uint32_t lui_const[32] = {0};
+#endif
     while (true) {
         if (prev_ir)
             prev_ir->next = ir;
@@ -723,6 +767,36 @@ retranslate:
         block->pc_end += is_compressed(insn) ? 2 : 4;
         block->n_insn++;
         prev_ir = ir;
+#if RV32_HAS(EXT_TT)
+        if (rv->tensix) {
+            /* Detect mailbox LW FIRST, before the constant tracker clears rs1.
+             * lw rd, imm(rs1) where rs1 == rd is common (lui a5; lw a5,0(a5)),
+             * so the check must happen before lui_const[rd] is cleared.
+             * Fall back to the live register value when the LUI wasn't in this
+             * block (e.g. the stall-retry block starts at the LW itself after
+             * do_lw_mailbox set PC = LW-address on a prior empty-FIFO stall). */
+            if (ir->opcode == rv_insn_lw) {
+                uint32_t base = lui_const[ir->rs1]
+                                    ? lui_const[ir->rs1]
+                                    : rv->X[ir->rs1];
+                uint32_t eff_addr = base + (uint32_t)ir->imm;
+                if (eff_addr >= 0xFFEC0000U && eff_addr <= 0xFFEC3FFFU) {
+                    fprintf(stderr, "[DBG:MBOX_COMPILE] core=%d block_pc=0x%x lw_pc=0x%x rs1=x%d base=0x%x (via_%s)\n",
+                            rv->core_id, block->pc_start, block->pc_end,
+                            ir->rs1, base,
+                            lui_const[ir->rs1] ? "lui_const" : "live_reg");
+                    ir->impl = do_lw_mailbox;
+                    break; /* terminate block: LW is the last instruction */
+                }
+            }
+            /* Update LUI constant tracker */
+            if (ir->opcode == rv_insn_lui) {
+                lui_const[ir->rd] = (uint32_t)ir->imm;
+            } else if (ir->rd < 32) {
+                lui_const[ir->rd] = 0; /* register overwritten, value unknown */
+            }
+        }
+#endif
 #if RV32_HAS(JIT)
         if (!insn_is_translatable(ir->opcode))
             block->translatable = false;
@@ -936,6 +1010,14 @@ static void optimize_constant(riscv_t *rv UNUSED, block_t *block)
 }
 
 //static block_t *prev = NULL;
+/* Address threshold separating TRISC firmware (low) from kernel code (high).
+ * When the PC crosses from below this value to above it, the block map is
+ * cleared so stale translations from a previous kernel do not pollute the
+ * new one.  0xa000 comfortably sits between the highest firmware base
+ * (MEM_TRISC2_FIRMWARE_BASE = 0x78C0) and the lowest kernel load address. */
+//#define TENSIX_KERNEL_ADDR_THRESHOLD 0xa000U
+#define TENSIX_KERNEL_ADDR_THRESHOLD 0x9f00U
+
 static block_t *block_find_or_translate(riscv_t *rv)
 {
 #if !RV32_HAS(JIT)
@@ -1159,6 +1241,52 @@ void rv_step(void *arg)
             rv->prev = cache_get(rv->block_cache, rv->last_pc, false);
 #endif
         }
+#if RV32_HAS(EXT_TT)
+        if (rv->tensix && rv->pre_pc) {
+            /* bit for this core in cores_in_kernel mask */
+            uint8_t core_bit = (rv->core_id < 0) ? (1u << 3) : (1u << rv->core_id);
+
+            if (rv->pre_pc < TENSIX_KERNEL_ADDR_THRESHOLD &&
+                rv->PC    >= TENSIX_KERNEL_ADDR_THRESHOLD) {
+                /* firmware → kernel */
+                fprintf(stderr, "[KERNEL-ENTER] core_id=%d PC=0x%x\n", rv->core_id, rv->PC);
+                rv->tensix->cores_in_kernel |= core_bit;
+                /* DEBUG: dump tensix state at kernel entry (remove when done) */
+                //if (rv->core_id == 0)
+                //    tensix_debug_dump_kernel_entry(rv->tensix);
+            } else if (rv->pre_pc >= TENSIX_KERNEL_ADDR_THRESHOLD &&
+                       rv->PC    <  TENSIX_KERNEL_ADDR_THRESHOLD) {
+                /* kernel → firmware: clear this core's block cache and bit */
+                block_map_clear(rv);
+                rv->prev = NULL;
+                rv->tensix->cores_in_kernel &= ~core_bit;
+                /* NCRISC (core 3): read rta_l1_base from LDM[0x38] and clear
+                 * the config struct it points to in L1 scratchpad. */
+                /* all cores back in firmware → safe to reset per-kernel state */
+                if (rv->tensix->cores_in_kernel == 0)
+                    tensix_clear(rv->tensix);
+            }
+        } else if (rv->core_id == 3) {
+            if (rv->pre_pc < TENSIX_KERNEL_ADDR_THRESHOLD && rv->PC >= TENSIX_KERNEL_ADDR_THRESHOLD) {
+                fprintf(stderr, "[KERNEL-ENTER] core_id=3(NCRISC) PC=0x%x\n", rv->PC);
+                /* Only clear JIT cache when kernel entry PC changes (different
+                 * binary or load offset). Reuse cached blocks for same kernel. */
+                static uint32_t ncrisc_prev_kernel_pc = 0;
+                if (ncrisc_prev_kernel_pc != rv->PC) {
+                    block_map_clear(rv);
+                    rv->prev = NULL;
+                    ncrisc_prev_kernel_pc = rv->PC;
+                }
+            } else if (rv->pre_pc >= TENSIX_KERNEL_ADDR_THRESHOLD && rv->PC < TENSIX_KERNEL_ADDR_THRESHOLD) {
+                /* NCRISC kernel→firmware: clear rta_l1_base config struct */
+                vm_attr_t *attr = PRIV(rv);
+                uint32_t rta_ptr = *(uint32_t *)(attr->mem->mem_local + 0x38);
+                if (rta_ptr + 10 * 4 <= 0x180000)
+                    memset(attr->mem->mem_base + rta_ptr, 0, 10 * 4);
+            }
+        }
+        rv->pre_pc = rv->PC;
+#endif
         /* lookup the next block in block map or translate a new block,
          * and move onto the next block.
          */
