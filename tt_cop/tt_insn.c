@@ -361,13 +361,6 @@ static bool ttreplay(tensix_t *tt, uint32_t imm, int tid) {
 
     if (count == 0) count = 64; /* Count=0 means 64 */
 
-    /* [DEBUG-OFF] REPLAY printing disabled for focused 4x4 debug */
-    /*
-    if (tt->noc_xy == ((2 << 6) | 1)) {
-        fprintf(stderr, "[REPLAY] NOC(%d,%d) tid=%d load=%d start=%d count=%d exec=%d\n",
-                tt->noc_xy & 0x3F, tt->noc_xy >> 6, tid, load, start_idx, count, exec);
-    }
-    */
 
     if (load) {
         /* Recording mode: set state so tensix_cop_step_direct will record */
@@ -559,10 +552,6 @@ static bool ttmova2d(tensix_t *tt, uint32_t imm, int tid) {
     }
 
 
-    fprintf(stderr, "[MOVA2D] noc=0x%x dest_base=%u srca_row=%u num_rows=%u bank=%d srca0=%f dest_rwc=%u\n",
-            tt->noc_xy, dest_base, srca_row, num_rows, mova2d_bank,
-            (srca_row < SRCA_ROWS) ? tt->srca[mova2d_bank][srca_row][0] : 0.f,
-            tt->dest_rwc[tid]);
     TT_DBG("[MOVA2D] srca_row=%d, dest_base=%d, num_rows=%d, bank=%d (last_unp)\n",
            srca_row, dest_base, num_rows, mova2d_bank);
 
@@ -762,11 +751,6 @@ static bool ttelwadd(tensix_t *tt, uint32_t imm, int tid) {
     /* Element-wise add: 8 rows x 16 columns */
     uint8_t ma_bank = tt->math_srca_bank;
     uint8_t mb_bank = tt->math_srcb_bank;
-    if (tt->noc_xy == ((2 << 6) | 1))
-        fprintf(stderr, "[ELWADD] noc=0x%x tid=%d math_offset=%u dest_rwc=%u dst_row=%u dest_base=%u srca_row=%u SrcA[0..3]=%f %f %f %f\n",
-                tt->noc_xy, tid, math_offset, tt->dest_rwc[tid], dst_row, dest_base, srca_row,
-                tt->srca[ma_bank][srca_row][0], tt->srca[ma_bank][srca_row][1],
-                tt->srca[ma_bank][srca_row][2], tt->srca[ma_bank][srca_row][3]);
     TT_DBG("[ELWADD] srca_row=%d, srcb_row=%d, dest_base=%d, bank_a=%d, bank_b=%d\n",
            srca_row, srcb_row, dest_base, ma_bank, mb_bank);
     TT_DBG("[ELWADD] SrcA[%d][%d][0..3] = %f %f %f %f\n", ma_bank, srca_row,
@@ -919,8 +903,6 @@ static bool ttsetrwc(tensix_t *tt, uint32_t imm, int tid) {
             val += tt->dest_rwc_cr[tid];
         tt->dest_rwc[tid] = val;
         tt->dest_rwc_cr[tid] = val;
-        fprintf(stderr, "[SETRWC:DST] noc=0x%x tid=%d rwc_d=%u->%u rwc_cr=0x%x bitmask=0x%x\n",
-                tt->noc_xy, tid, old_val, val, rwc_cr, bitmask);
     }
     if (bitmask & 0x8) {  /* Fidelity */
         tt->fidelity[tid] = 0;
@@ -1222,111 +1204,100 @@ static bool ttpacr(tensix_t *tt, uint32_t imm, int tid) {
     /* L1 byte base address (skip 16-byte tile header) */
     uint32_t l1_base_byte_addr = (l1_dest_addr & 0x1FFFF) << 4;
 
-    /* Compute Dest input address.
-     * The packer_mask selects which physical packer interfaces are active.
-     * In hardware, all active packers work in parallel on the SAME data block.
-     * We use cfg[180] (packer section 0) for the dest offset.
+    /*
+     * Per-packer cfg indices:
+     *   L1_Dest_addr: THCON_SEC0_REG1=cfg[69], THCON_SEC0_REG8=cfg[97],
+     *                 THCON_SEC1_REG1=cfg[117], THCON_SEC1_REG8=cfg[145]
+     *   In/Out format: cfg[70], cfg[98], cfg[118], cfg[146]
+     *   DEST offset:   cfg[180], cfg[181], cfg[182], cfg[183]
      */
-    {
-        uint32_t addr = pck_base_in
+    static const uint32_t pck_l1_cfg_idx[4]  = {69, 97, 117, 145};
+    static const uint32_t pck_fmt_cfg_idx[4] = {70, 98, 118, 146};
+
+    /* Compute num_datums (shared across packers - same ADC, same x/y count) */
+    uint32_t num_datums;
+    if (flush) {
+        num_datums = 0;
+    } else {
+        uint32_t x_count = (adc->ch1_x >= adc->ch0_x) ? (adc->ch1_x - adc->ch0_x + 1) : 0;
+        uint32_t pack_reg0 = tt->thd_reg[tid][37]; /* always addr_mod[0] */
+        uint32_t ysrc_incr0 = pack_reg0 & 0xF;
+        uint32_t y_count = (ysrc_incr0 > 0) ? ysrc_incr0 : 1;
+        num_datums = x_count * y_count;
+    }
+    if (num_datums > 1024) num_datums = 1024;
+
+    /* L1 base address for packer 0 (advances via pack_l1_write_offset) */
+    uint32_t l1_byte_addr_p0 = l1_base_byte_addr + tt->pack_l1_write_offset;
+
+    /* Loop over all 4 packers; process only those selected by read_intf_sel */
+    for (int pck = 0; pck < 4; pck++) {
+        if (!(read_intf_sel & (1u << pck))) continue;
+
+        /* Per-packer DEST offset (DEST_TARGET_REG_CFG_PACK_SECi.Offset).
+         * In DST_ACCESS_STRIDED_MODE all packers read different faces of the same tile;
+         * firmware only sets cfg[180] (pck=0), so all packers must share that base offset. */
+        uint32_t dest_off_idx = dst_access_mode ? 180u : (180u + (uint32_t)pck);
+        uint32_t dest_offset_p = (dest_off_idx < CFG_REG_COUNT) ?
+            (tensix_read_cfg(&tt->mem, dest_off_idx) & 0xFFF) : 0;
+
+        /* Compute DEST source address for this packer.
+         * All packers share the same DEST/output datum format (bytes_per_datum, adc_x_mask,
+         * out_dsb, out_data_fmt) because firmware only writes cfg[70] in pack_untilize. */
+        uint32_t addr_p_raw = pck_base_in
             + adc->ch0_x * (pck_xstride_in & 0xF)
             + adc->ch0_y * pck_ystride_in
             + adc->ch0_z * pck_zstride_in
             + adc->ch0_w * pck_wstride_in;
+        uint32_t addr_p = ((addr_p_raw / bytes_per_datum) & ~adc_x_mask) + (adc->ch0_x & adc_x_mask);
+        addr_p += dest_offset_p << 4;
+        /* DST_ACCESS_STRIDED_MODE: packer i reads from face i of DEST.
+         * Face i starts 256 datums (= FACE_R_DIM*FACE_C_DIM = 16*16) after face 0. */
+        if (dst_access_mode) addr_p += (uint32_t)pck * (16u * 16u);
+        uint32_t src_addr_p = addr_p & 0x3FFF;
 
-        /* Convert byte address to datum address */
-        addr = ((addr / bytes_per_datum) & ~adc_x_mask) + (adc->ch0_x & adc_x_mask);
+        /* L1 output address: packer i follows packer i-1 with out_dsb bytes per datum. */
+        uint32_t l1_byte_addr_p = l1_byte_addr_p0 + (uint32_t)pck * num_datums * out_dsb;
 
-        /* Add DEST_TARGET_REG_CFG_PACK_SEC0.Offset << 4 */
-        uint32_t dest_offset = 0;
-        if (180 < CFG_REG_COUNT) {
-            dest_offset = tensix_read_cfg(&tt->mem, 180) & 0xFFF;
-        }
-        addr += dest_offset << 4;
+        if (tt->mem.l1_scratchpad == NULL || num_datums == 0) continue;
 
-        uint32_t src_addr = addr & 0x3FFF;
-
-        /* Number of datums to pack per PACR call.
-         * Hardware packs a 2D block: x_count columns × y_count rows.
-         * y_count comes from ysrc_incr in addr_mod[0] (thd_reg[37]),
-         * which represents the packer's row count per call regardless of
-         * which addr_mode the current PACR instruction uses.
+        /* Read 2D block from Dest and write to L1.
+         * Dest is 16 columns wide; one row = 16 datums.
          */
-        uint32_t num_datums;
-        if (flush) {
-            num_datums = 0;
-        } else {
-            uint32_t x_count = (adc->ch1_x >= adc->ch0_x) ? (adc->ch1_x - adc->ch0_x + 1) : 0;
-            uint32_t pack_reg0 = tt->thd_reg[tid][37]; /* always addr_mod[0] */
-            uint32_t ysrc_incr0 = pack_reg0 & 0xF;
-            uint32_t y_count = (ysrc_incr0 > 0) ? ysrc_incr0 : 1;
-            num_datums = x_count * y_count;
-        }
-        if (num_datums > 1024) num_datums = 1024;
+        uint32_t pack_reg0 = tt->thd_reg[tid][37];
+        uint32_t ysrc_incr0 = pack_reg0 & 0xF;
+        uint32_t y_count = (ysrc_incr0 > 0) ? ysrc_incr0 : 1;
+        uint32_t x_count = (num_datums > 0) ? num_datums / y_count : 0;
 
-        /* Compute L1 output byte address.
-         * In normal pack mode the firmware does not configure CH1 output strides
-         * (cfg[14]/[15]).  The hardware writes datums sequentially from l1_dest_addr.
-         * We track a running byte offset (pack_l1_write_offset) that advances by
-         * num_datums * out_dsb after each PACR call.
-         */
-        uint32_t l1_byte_addr = l1_base_byte_addr + tt->pack_l1_write_offset;
+        uint32_t l1_idx = 0;
+        for (uint32_t row = 0; row < y_count; row++) {
+            for (uint32_t col = 0; col < x_count; col++) {
+                uint32_t d_idx = src_addr_p + row * 16 + col;
+                uint32_t d_row = (d_idx >> 4) & 0x3FF;
+                uint32_t d_col = d_idx & 0xF;
 
-        /* In FP32 mode the emulator writes complete datums for each packer call.
-         * Even-numbered packers (0,2) handle bytes {0,2} and odd-numbered (1,3)
-         * handle bytes {1,3} of each FP32.  Since the emulator writes the full
-         * 4-byte datum on the even-packer pass, skip the L1 write (and offset
-         * advance) when only odd packers are selected. */
-        if ((read_intf_sel & 0x5) == 0) num_datums = 0;
-
-        if (tt->mem.l1_scratchpad != NULL && num_datums > 0) {
-            fprintf(stderr, "[PACR] noc=0x%x src_addr=%u(row=%u) num=%u l1=0x%x am=%u ch0y=%u ch0z=%u val0=%f\n",
-                    tt->noc_xy, src_addr, src_addr>>4, num_datums, l1_byte_addr, addr_mode,
-                    adc->ch0_y, adc->ch0_z,
-                    (src_addr>>4 < DEST_ROWS) ? tt->dest[src_addr>>4][0] : 0.f);
-            TT_DBG("[PACR] src_addr=%d, num_datums=%d, l1_addr=0x%x, out_fmt=%d\n",
-                   src_addr, num_datums, l1_byte_addr, out_data_fmt);
-            TT_DBG("[PACR] Dest[%d][0..3] = %f %f %f %f\n", src_addr >> 4,
-                   tt->dest[src_addr >> 4][0], tt->dest[src_addr >> 4][1],
-                   tt->dest[src_addr >> 4][2], tt->dest[src_addr >> 4][3]);
-
-            /* Read 2D block from Dest (y_count rows × x_count cols).
-             * Dest is 16 columns wide; one row = 16 datums.
-             * Output to L1 is sequential (row after row, no gaps).
-             */
-            uint32_t ystride_datums = 16;
-
-            uint32_t pack_reg0 = tt->thd_reg[tid][37];
-            uint32_t ysrc_incr0 = pack_reg0 & 0xF;
-            uint32_t y_count = (ysrc_incr0 > 0) ? ysrc_incr0 : 1;
-            uint32_t x_count = (num_datums > 0) ? num_datums / y_count : 0;
-
-            uint32_t l1_idx = 0;
-            for (uint32_t row = 0; row < y_count; row++) {
-                for (uint32_t col = 0; col < x_count; col++) {
-                    uint32_t d_idx = src_addr + row * ystride_datums + col;
-                    uint32_t d_row = (d_idx >> 4) & 0x3FF;
-                    uint32_t d_col = d_idx & 0xF;
-
-                    float val = 0.0f;
-                    if (!zero_write && d_row < DEST_ROWS) {
-                        val = tt->dest[d_row][d_col];
-                    }
-
-                    uint32_t raw = float_to_datum(val, out_data_fmt);
-                    uint32_t l1_off = l1_byte_addr + l1_idx * out_dsb;
-                    if (l1_off + out_dsb <= 0x180000) {
-                        memcpy(tt->mem.l1_scratchpad + l1_off, &raw, out_dsb);
-                        if (l1_idx < 4) TT_DBG("[PACR]   Dest[%d][%d]=%f -> L1[0x%x]=0x%x\n", d_row, d_col, val, l1_off, raw);
-                    }
-                    l1_idx++;
+                float val = 0.0f;
+                if (!zero_write && d_row < DEST_ROWS) {
+                    val = tt->dest[d_row][d_col];
                 }
-            }
-            /* (TILE-DUMP at tile boundaries handles output logging) */
 
-            /* Advance running L1 write offset for next PACR */
-            tt->pack_l1_write_offset += num_datums * out_dsb;
+                uint32_t raw = float_to_datum(val, out_data_fmt);
+                uint32_t l1_off = l1_byte_addr_p + l1_idx * out_dsb;
+                if (l1_off + out_dsb <= 0x180000) {
+                    memcpy(tt->mem.l1_scratchpad + l1_off, &raw, out_dsb);
+                }
+                l1_idx++;
+            }
         }
+    }
+
+    /* Advance L1 write offset by the full chunk written by all active packers.
+     * For multi-PACR sequences (last=0 followed by last=1 for multi-tile), the
+     * next call must start right after all packers from this call. */
+    if (num_datums > 0) {
+        uint32_t num_active = (uint32_t)__builtin_popcount(read_intf_sel & 0xF);
+        if (num_active == 0) num_active = 1;
+        tt->pack_l1_write_offset += num_active * num_datums * out_dsb;
     }
 
     /* Apply packer address modifier from ThreadConfig thd_reg[37+i]
@@ -1530,15 +1501,6 @@ static bool ttunpacr(tensix_t *tt, uint32_t imm, int tid) {
 
     /* Debug: always print source address to diagnose zero-data issue */
     {
-        static int unpacr_dbg = 16;
-        if (unpacr_dbg > 0) {
-            unpacr_dbg--;
-            uint32_t peek = 0;
-            if (tt->mem.l1_scratchpad && in_addr < 0x200000)
-                peek = *(uint32_t *)(tt->mem.l1_scratchpad + in_addr);
-            fprintf(stderr, "[UNPACR:SRC] noc=0x%x tid=%d which=%d ctx=%d base=0x%x off=0x%x in_addr=0x%x peek=0x%x tilize=%d shift=%d\n",
-                    tt->noc_xy, tid, which_unp, which_ctx, base_addr, offset_addr, in_addr, peek, tileize_mode, shift_amount);
-        }
     }
 
     /* Datum size from input format */
@@ -3451,12 +3413,6 @@ static bool ttwrcfg(tensix_t *tt, uint32_t imm, int tid) {
                 tensix_write_cfg(&tt->mem, cfg_base + i, value);
                 TT_DBG("[WRCFG] thread=%d, cfg[%d] = 0x%x (from dma_reg[%d])\n",
                        tid, cfg_base + i, value, gpr_base + i);
-                if (cfg_base + i == 16)
-                    fprintf(stderr, "[WRCFG:CFG16] noc=0x%x tid=%d pck_base_in=0x%x\n",
-                            tt->noc_xy, tid, value);
-                if (cfg_base + i == 72 || cfg_base + i == 76 || cfg_base + i == 77)
-                    fprintf(stderr, "[WRCFG:UNPACK] noc=0x%x tid=%d cfg[%d]=0x%x\n",
-                            tt->noc_xy, tid, cfg_base + i, value);
                 if (cfg_base + i == 69)
                     tt->pack_l1_write_offset = 0;
             }
@@ -3465,17 +3421,9 @@ static bool ttwrcfg(tensix_t *tt, uint32_t imm, int tid) {
         /* 32-bit write to high_mem */
         if (cfg_index < CFG_REG_COUNT && gpr_addr < DMA_REG_COUNT) {
             uint32_t value = tt->dma_reg[tid][gpr_addr];
-            fprintf(stderr, "[DBG:WRCFG32] noc=0x%x tid=%d cfg[%d]=0x%x (dma_reg[%d])\n",
-                    tt->noc_xy, tid, cfg_index, value, gpr_addr);
             tensix_write_cfg(&tt->mem, cfg_index, value);
             TT_DBG("[WRCFG] thread=%d, cfg[%d] = 0x%x (from dma_reg[%d])\n",
                    tid, cfg_index, value, gpr_addr);
-            if (cfg_index == 16)
-                fprintf(stderr, "[WRCFG:CFG16] noc=0x%x tid=%d pck_base_in=0x%x\n",
-                        tt->noc_xy, tid, value);
-            if (cfg_index == 72 || cfg_index == 76 || cfg_index == 77)
-                fprintf(stderr, "[WRCFG:UNPACK] noc=0x%x tid=%d cfg[%d]=0x%x\n",
-                        tt->noc_xy, tid, cfg_index, value);
             if (cfg_index == 69)
                 tt->pack_l1_write_offset = 0;
             /* PRNG seed: cfg[186] (PRNG_SEED_Seed_Val_ADDR32) */
@@ -3519,9 +3467,6 @@ static bool ttsetc16(tensix_t *tt, uint32_t imm, int tid) {
 
     if (cfg_index < THD_REG_COUNT) {
         tt->thd_reg[tid][cfg_index] = value;
-        if (cfg_index == 1)  /* DEST_TARGET_REG_CFG_MATH_Offset */
-            fprintf(stderr, "[SETC16:MATH_OFFSET] noc=0x%x tid=%d math_offset=%u\n",
-                    tt->noc_xy, tid, value);
     }
 
     return true;
@@ -3551,9 +3496,6 @@ static void rmwcib_common(tensix_t *tt, uint32_t imm, uint32_t byte_offset)
     uint8_t old_byte = cfg_bytes[byte_offset];
     cfg_bytes[byte_offset] = (new_value & mask) | (old_byte & ~mask);
 
-    if (index4 == 16)
-        fprintf(stderr, "[RMWCIB:CFG16] noc=0x%x cfg[16] byte%u: 0x%x->0x%x\n",
-                tt->noc_xy, byte_offset, old_byte, cfg_bytes[byte_offset]);
     if (index4 == 69)
         tt->pack_l1_write_offset = 0;
 }

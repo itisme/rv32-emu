@@ -1582,14 +1582,6 @@ static bool drain_replay_expansion(tensix_cop_t *cop, int core_id)
         }
 
         if (core->replay_expand_current[core_id] >= core->replay_expand_count[core_id]) {
-            {
-                static int rpl_dbg = 4;
-                if (rpl_dbg > 0) {
-                    fprintf(stderr, "[DBG:REPLAY:DONE] core=%d replayed %u/%u insns\n",
-                            core_id, core->replay_expand_current[core_id], core->replay_expand_count[core_id]);
-                    rpl_dbg--;
-                }
-            }
             core->replay_expanding[core_id] = false;
             return true;
         }
@@ -1673,17 +1665,6 @@ void tensix_cop_mop_expand(tensix_cop_t *cop, int core_id, uint32_t param)
     st->active = true;
     st->tmpl = tmpl;
     thread->has_current_insn = false;
-
-    /* [DEBUG] MOP expand */
-    {
-        static int mop_dbg = 4;
-        if (mop_dbg > 0 && tmpl == 1) {
-            fprintf(stderr, "[DBG:MOP-EXPAND] core=%d tmpl=%d param=0x%06x cfg=[0x%x,0x%x,0x%x,0x%x,0x%x,0x%x,0x%x,0x%x,0x%x]\n",
-                    core_id, tmpl, param,
-                    cfg[0], cfg[1], cfg[2], cfg[3], cfg[4], cfg[5], cfg[6], cfg[7], cfg[8]);
-            mop_dbg--;
-        }
-    }
 
     if (tmpl == 0) {
         uint32_t count1 = (param >> 16) & 0x7F;

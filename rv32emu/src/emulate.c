@@ -469,8 +469,6 @@ static bool do_lw_mailbox(riscv_t *rv, const rv_insn_t *ir,
     cycle++;
     const uint32_t rs1_val = rv->X[ir->rs1]; /* save before potential rd overwrite */
     const uint32_t addr = rs1_val + ir->imm;
-    fprintf(stderr, "[DBG:MBOX_ENTER] core=%d PC=0x%x addr=0x%x\n",
-            rv->core_id, PC, addr);
     rv->X[ir->rd] = rv->io.mem_read_w(rv, addr);
 
     int mci = mailbox_core_index(rv->core_id);
@@ -485,8 +483,6 @@ static bool do_lw_mailbox(riscv_t *rv, const rv_insn_t *ir,
         return false;
     }
 
-    fprintf(stderr, "[DBG:MBOX_LW] core=%d PC=0x%x addr=0x%x rd=x%d val=0x%x\n",
-            rv->core_id, PC, addr, ir->rd, rv->X[ir->rd]);
     rv->csr_cycle = cycle;
     rv->PC = PC + 4;
     return true;
@@ -781,10 +777,6 @@ retranslate:
                                     : rv->X[ir->rs1];
                 uint32_t eff_addr = base + (uint32_t)ir->imm;
                 if (eff_addr >= 0xFFEC0000U && eff_addr <= 0xFFEC3FFFU) {
-                    fprintf(stderr, "[DBG:MBOX_COMPILE] core=%d block_pc=0x%x lw_pc=0x%x rs1=x%d base=0x%x (via_%s)\n",
-                            rv->core_id, block->pc_start, block->pc_end,
-                            ir->rs1, base,
-                            lui_const[ir->rs1] ? "lui_const" : "live_reg");
                     ir->impl = do_lw_mailbox;
                     break; /* terminate block: LW is the last instruction */
                 }
@@ -1249,11 +1241,7 @@ void rv_step(void *arg)
             if (rv->pre_pc < TENSIX_KERNEL_ADDR_THRESHOLD &&
                 rv->PC    >= TENSIX_KERNEL_ADDR_THRESHOLD) {
                 /* firmware → kernel */
-                fprintf(stderr, "[KERNEL-ENTER] core_id=%d PC=0x%x\n", rv->core_id, rv->PC);
                 rv->tensix->cores_in_kernel |= core_bit;
-                /* DEBUG: dump tensix state at kernel entry (remove when done) */
-                //if (rv->core_id == 0)
-                //    tensix_debug_dump_kernel_entry(rv->tensix);
             } else if (rv->pre_pc >= TENSIX_KERNEL_ADDR_THRESHOLD &&
                        rv->PC    <  TENSIX_KERNEL_ADDR_THRESHOLD) {
                 /* kernel → firmware: clear this core's block cache and bit */
@@ -1268,7 +1256,6 @@ void rv_step(void *arg)
             }
         } else if (rv->core_id == 3) {
             if (rv->pre_pc < TENSIX_KERNEL_ADDR_THRESHOLD && rv->PC >= TENSIX_KERNEL_ADDR_THRESHOLD) {
-                fprintf(stderr, "[KERNEL-ENTER] core_id=3(NCRISC) PC=0x%x\n", rv->PC);
                 /* Only clear JIT cache when kernel entry PC changes (different
                  * binary or load offset). Reuse cached blocks for same kernel. */
                 static uint32_t ncrisc_prev_kernel_pc = 0;

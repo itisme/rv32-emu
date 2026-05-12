@@ -556,9 +556,6 @@ bool tensix_mmio_write(tensix_t *tt, int core_id, uint32_t addr, uint32_t data)
      */
     if (addr >= 0xFFEF0000 && addr <= 0xFFEFFFFF) {
         uint32_t reg_idx = (addr - 0xFFEF0000) / 4;
-        if (reg_idx == 72 || reg_idx == 76 || reg_idx == 77)
-            fprintf(stderr, "[CFG:MMIO_WRITE] noc=0x%x core=%d cfg[%u]=0x%x\n",
-                    tt ? tt->noc_xy : 0, core_id, reg_idx, data);
         if (reg_idx == 76 || reg_idx == 92 || reg_idx == 124 || reg_idx == 140 ||
             (reg_idx >= 64 && reg_idx <= 67) || (reg_idx >= 112 && reg_idx <= 115)) {
             TT_DBG("[CFG_MMIO] core=%d, cfg[%d] = 0x%x (addr=0x%x)\n",
@@ -567,8 +564,6 @@ bool tensix_mmio_write(tensix_t *tt, int core_id, uint32_t addr, uint32_t data)
         /* Reset pack L1 write offset when L1_Dest_addr (cfg[69]) is written */
         if (reg_idx == 69) {
             tt->pack_l1_write_offset = 0;
-            fprintf(stderr, "[DBG:MMIO:CFG69] noc=0x%x reg_idx=69 val=0x%08x\n",
-                    tt->noc_xy, data);
         }
         /* PRNG seed: cfg[186] (PRNG_SEED_Seed_Val_ADDR32) or cfg[186+224] (bank 1) */
         if (reg_idx == 186 || reg_idx == (186 + 224)) {
@@ -589,14 +584,6 @@ void tensix_clear(tensix_t *tt)
 {
     if (!tt)
         return;
-
-    {
-        uint32_t c72 = tensix_read_cfg(&tt->mem, 72);
-        uint32_t c76 = tensix_read_cfg(&tt->mem, 76);
-        uint32_t c77 = tensix_read_cfg(&tt->mem, 77);
-        fprintf(stderr, "[TENSIX_CLEAR] resetting per-kernel state cfg[72]=0x%x cfg[76]=0x%x cfg[77]=0x%x\n",
-                c72, c76, c77);
-    }
 
     /* Save fields that must survive the wipe */
     tensix_memory_t saved_mem    = tt->mem;
