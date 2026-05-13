@@ -64,7 +64,7 @@ static void block_map_init(block_map_t *map, const uint8_t bits)
 void block_map_clear(riscv_t *rv)
 {
 #if RV32_HAS(EXT_TT)
-    fprintf(stderr, "[BLOCK-CLEAR] core_id=%d PC=0x%x\n", rv->core_id, rv->PC);
+    TT_DBG("[BLOCK-CLEAR] core_id=%d PC=0x%x\n", rv->core_id, rv->PC);
 #endif
     block_map_t *map = &rv->block_map;
     for (uint32_t i = 0; i < map->block_capacity; i++) {
@@ -230,9 +230,6 @@ IO_HANDLER_IMPL(word, write_w, W)
 /* Track half-word writes by TRISC0 to L1 local area (catches tiles_acked updates) */
 static void on_mem_write_s(riscv_t *rv, riscv_word_t addr, riscv_half_t data)
 {
-    if (rv->core_id == 0 && addr >= 0xffb00000 && addr < 0xffb10000)
-        fprintf(stderr, "[DBG:TILES_ACKD_W] core=%d PC=0x%05x addr=0x%x val=0x%x\n",
-                rv->core_id, rv->PC, addr, (uint32_t)(uint16_t)data);
     memory_write_s(PRIV(rv)->mem, addr, (uint8_t *) &data);
 }
 #else

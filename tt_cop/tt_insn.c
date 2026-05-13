@@ -1227,12 +1227,38 @@ static bool ttpacr(tensix_t *tt, uint32_t imm, int tid) {
     }
     if (num_datums > 1024) num_datums = 1024;
 
+    /* In FP32 mode the emulator writes complete datums for each packer call.
+     * Even-numbered packers (0,2) handle bytes {0,2} and odd-numbered (1,3)
+     * handle bytes {1,3} of each FP32.  Since the emulator writes the full
+     * 4-byte datum on the even-packer pass, skip the L1 write (and offset
+     * advance) when only odd packers are selected. */
+    if ((read_intf_sel & 0x5) == 0) num_datums = 0;
+
     /* L1 base address for packer 0 (advances via pack_l1_write_offset) */
     uint32_t l1_byte_addr_p0 = l1_base_byte_addr + tt->pack_l1_write_offset;
 
-    /* Loop over all 4 packers; process only those selected by read_intf_sel */
-    for (int pck = 0; pck < 4; pck++) {
+    /* Number of active packers from mask */
+    uint32_t num_active = (uint32_t)__builtin_popcount(read_intf_sel & 0xF);
+    if (num_active == 0) num_active = 1;
+
+    /* Byte-lane splitting masks (0x5=_0th_AND_2nd_INTF_ACTIVE=Packers 0+2,
+     * 0xA=_1st_AND_3rd_INTF_ACTIVE=Packers 1+3, per ckernel_instr_params.h).
+     * When dst_access_mode=0 both active packers read the same Dest data but split
+     * byte lanes in hardware (ISA: Packers[0]+Packers[2] share input).
+     * Since the emulator writes complete datums, skip the secondary packer to avoid
+     * double output.  When dst_access_mode=1 each packer reads a different face,
+     * so all active packers write distinct data. */
+    bool byte_lane_dup = !dst_access_mode && (read_intf_sel == 0x5 || read_intf_sel == 0xA);
+    if (byte_lane_dup) num_active = 1;
+
+    /* Loop over all 4 packers; process only those selected by read_intf_sel.
+     * L1 output address uses a sequential active_idx so that non-contiguous masks
+     * (e.g. 0x5 → pck=0,2) do not leave gaps or cause subsequent call overlap. */
+    for (int pck = 0, active_idx = 0; pck < 4; pck++) {
         if (!(read_intf_sel & (1u << pck))) continue;
+
+        /* Byte-lane duplication: skip the secondary packer */
+        if (byte_lane_dup && (pck == 2 || pck == 3)) continue;
 
         /* Per-packer DEST offset (DEST_TARGET_REG_CFG_PACK_SECi.Offset).
          * In DST_ACCESS_STRIDED_MODE all packers read different faces of the same tile;
@@ -1256,8 +1282,9 @@ static bool ttpacr(tensix_t *tt, uint32_t imm, int tid) {
         if (dst_access_mode) addr_p += (uint32_t)pck * (16u * 16u);
         uint32_t src_addr_p = addr_p & 0x3FFF;
 
-        /* L1 output address: packer i follows packer i-1 with out_dsb bytes per datum. */
-        uint32_t l1_byte_addr_p = l1_byte_addr_p0 + (uint32_t)pck * num_datums * out_dsb;
+        /* L1 output address: sequential active_idx avoids gaps on non-contiguous masks */
+        uint32_t l1_byte_addr_p = l1_byte_addr_p0 + (uint32_t)active_idx * num_datums * out_dsb;
+        active_idx++;
 
         if (tt->mem.l1_scratchpad == NULL || num_datums == 0) continue;
 
@@ -1292,11 +1319,8 @@ static bool ttpacr(tensix_t *tt, uint32_t imm, int tid) {
     }
 
     /* Advance L1 write offset by the full chunk written by all active packers.
-     * For multi-PACR sequences (last=0 followed by last=1 for multi-tile), the
-     * next call must start right after all packers from this call. */
+     * num_active already accounts for byte-lane skipping if applicable. */
     if (num_datums > 0) {
-        uint32_t num_active = (uint32_t)__builtin_popcount(read_intf_sel & 0xF);
-        if (num_active == 0) num_active = 1;
         tt->pack_l1_write_offset += num_active * num_datums * out_dsb;
     }
 

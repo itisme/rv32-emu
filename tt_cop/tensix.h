@@ -315,7 +315,7 @@ static inline uint32_t tensix_read_cfg(tensix_memory_t *mem, uint32_t reg_idx) {
 static inline void tensix_write_cfg(tensix_memory_t *mem, uint32_t reg_idx, uint32_t value) {
     if (mem->high_mem && reg_idx < CFG_REG_COUNT) {
         if (reg_idx == 72 || reg_idx == 76 || reg_idx == 77)
-            fprintf(stderr, "[CFG:WRITE] cfg[%u]=0x%x\n", reg_idx, value);
+            TT_DBG("[CFG:WRITE] cfg[%u]=0x%x\n", reg_idx, value);
         *(uint32_t *)(mem->high_mem + TENSIX_CFG_OFFSET_IN_HIGH_MEM + reg_idx * 4) = value;
     }
 }
