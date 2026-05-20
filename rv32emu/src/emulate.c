@@ -487,6 +487,14 @@ static bool do_lw_mailbox(riscv_t *rv, const rv_insn_t *ir,
     rv->PC = PC + 4;
     return true;
 }
+
+/* Per-core cleanup on kernel → firmware transition; shared tensix_clear runs after all cores exit. */
+static void kernel_exit_core_cleanup(riscv_t *rv)
+{
+    block_map_clear(rv);
+    rv->prev = NULL;
+}
+
 #endif
 
 /* multiple LUI */
@@ -1244,13 +1252,10 @@ void rv_step(void *arg)
                 rv->tensix->cores_in_kernel |= core_bit;
             } else if (rv->pre_pc >= TENSIX_KERNEL_ADDR_THRESHOLD &&
                        rv->PC    <  TENSIX_KERNEL_ADDR_THRESHOLD) {
-                /* kernel → firmware: clear this core's block cache and bit */
-                block_map_clear(rv);
-                rv->prev = NULL;
+                /* kernel → firmware: per-core cleanup, then clear bit */
+                kernel_exit_core_cleanup(rv);
                 rv->tensix->cores_in_kernel &= ~core_bit;
-                /* NCRISC (core 3): read rta_l1_base from LDM[0x38] and clear
-                 * the config struct it points to in L1 scratchpad. */
-                /* all cores back in firmware → safe to reset per-kernel state */
+                /* all cores back in firmware → safe to reset shared kernel state */
                 if (rv->tensix->cores_in_kernel == 0)
                     tensix_clear(rv->tensix);
             }
@@ -1260,8 +1265,7 @@ void rv_step(void *arg)
                  * binary or load offset). Reuse cached blocks for same kernel. */
                 static uint32_t ncrisc_prev_kernel_pc = 0;
                 if (ncrisc_prev_kernel_pc != rv->PC) {
-                    block_map_clear(rv);
-                    rv->prev = NULL;
+                    kernel_exit_core_cleanup(rv);
                     ncrisc_prev_kernel_pc = rv->PC;
                 }
             } else if (rv->pre_pc >= TENSIX_KERNEL_ADDR_THRESHOLD && rv->PC < TENSIX_KERNEL_ADDR_THRESHOLD) {

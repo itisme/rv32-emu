@@ -185,6 +185,145 @@ const insn_impl tt_jump_table[256] = {
     OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), // 0xf0
 };
 
+/* Full name table - read-only reference for auto-enable */
+#undef OP
+#define OP(name) #name
+static const char * const tt_all_names[256] = {
+    OP(unimp),   OP(ttmop),   OP(ttnop),   OP(ttmop_cfg), OP(ttreplay), OP(ttresourcedecl), OP(unimp), OP(unimp), OP(ttmovd2a), OP(ttmovdbga2d), OP(ttmovd2b), OP(ttmovb2a), OP(ttmovdbgb2d), OP(unimp), OP(unimp), OP(unimp),
+    OP(ttzeroacc), OP(ttzerosrc), OP(ttmova2d), OP(ttmovb2d), OP(tttrnspsrca), OP(ttrareb), OP(tttrnspsrcb), OP(ttshiftxa), OP(ttshiftxb), OP(unimp), OP(ttsetashrmh0), OP(ttsetashrmh1), OP(ttsetashrmv), OP(ttsetpkedgof), OP(ttsetashrmh), OP(unimp),
+    OP(unimp), OP(ttclrexphist), OP(ttconv3s1), OP(ttconv3s2), OP(ttmpool3s1), OP(ttapool3s1), OP(ttmvmul), OP(ttelwmul), OP(ttelwadd), OP(ttdotpv), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp),
+    OP(ttelwsub), OP(ttmpool3s2), OP(ttapool3s2), OP(ttgmpool), OP(ttgapool), OP(ttgatesrcrst), OP(ttcleardvalid), OP(ttsetrwc), OP(ttincrwc), OP(ttsetibrwc), OP(ttmfconv3s1), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp),
+    OP(ttxmov), OP(ttpacr), OP(ttunpacr), OP(ttunpacr_nop), OP(ttrstdma), OP(ttsetdmareg), OP(ttflushdma), OP(unimp), OP(ttreg2flop), OP(ttloadind), OP(ttpacr_setreg), OP(tttbufcmd), OP(unimp), OP(unimp), OP(unimp), OP(unimp),
+    OP(ttsetadc), OP(ttsetadcxy), OP(ttincadcxy), OP(ttaddrcrxy), OP(ttsetadczw), OP(ttincadczw), OP(ttaddrcrzw), OP(ttsetdvalid), OP(ttadddmareg), OP(ttsubdmareg), OP(ttmuldmareg), OP(ttbitwopdmareg), OP(ttshiftdmareg), OP(ttcmpdmareg), OP(ttsetadcxx), OP(unimp),
+    OP(ttdmanop), OP(ttatincget), OP(ttatincgetptr), OP(ttatswap), OP(ttatcas), OP(unimp), OP(ttstoreind), OP(ttstorereg), OP(ttloadreg), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp),
+    OP(sfpload), OP(sfploadi), OP(sfpstore), OP(sfplut), OP(sfpmuli), OP(sfpaddi), OP(sfpdivp2), OP(sfpexexp), OP(sfpexman), OP(sfpiadd), OP(sfpshft), OP(sfpsetcc), OP(sfpmov), OP(sfpabs), OP(sfpand), OP(sfpor),
+    OP(sfpnot), OP(sfplz), OP(sfpsetexp), OP(sfpsetman), OP(sfpmad), OP(sfpadd), OP(sfpmul), OP(sfppushc), OP(sfppopc), OP(sfpsetsgn), OP(sfpencc), OP(sfpcompc), OP(sfptransp), OP(sfpxor), OP(sfpstochrnd), OP(sfpnop),
+    OP(sfpcast), OP(sfpconfig), OP(sfpswap), OP(sfploadmacro), OP(sfpshft2), OP(sfplutfp32), OP(sfple), OP(sfpgt), OP(sfpmul24), OP(sfparecip), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp),
+    OP(ttatgetm), OP(ttatrelm), OP(ttstallwait), OP(ttseminit), OP(ttsempost), OP(ttsemget), OP(ttsemwait), OP(ttstreamwait), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp),
+    OP(ttwrcfg), OP(ttrdcfg), OP(ttsetc16), OP(ttrmwcib0), OP(ttrmwcib1), OP(ttrmwcib2), OP(ttrmwcib3), OP(ttstreamwrcfg), OP(ttcfgshiftmask), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp),
+    OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp),
+    OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp),
+    OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp),
+    OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp), OP(unimp),
+};
+#undef OP
+#define OP(name) name
+
+/* Mutable print filter: NULL=silent, non-NULL=always print.
+ * NULL entries are auto-enabled at runtime if their first execution >= 5us. */
+static const char *tt_insn_names[256] = {
+    [0x41] = "ttpacr",
+    [0x42] = "ttunpacr",
+    [0x34] = "ttgapool",
+    [0xa3] = "ttseminit",
+    [0xa4] = "ttsempost",
+    [0xa6] = "ttsemwait",
+};
+
+/* Per-opcode execution time (ns); 0 = not yet evaluated for auto-enable */
+static uint64_t tt_insn_times[256];
+
+static uint64_t tt_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static void tt_wall_str(char *buf, size_t len) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tm;
+    localtime_r(&ts.tv_sec, &tm);
+    snprintf(buf, len, "%04d-%02d-%02d %02d:%02d:%02d.%03ld",
+             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+             tm.tm_hour, tm.tm_min, tm.tm_sec,
+             ts.tv_nsec / 1000000);
+}
+
+/* Per-instruction timing. Enable with TT_INSN_TIMING=1 env var.
+ * tt_insn_names controls which instructions print (NULL=silent).
+ * NULL entries are auto-enabled on first slow execution (>= 5us), evaluated once.
+ * Tile boundaries marked between first t0 ttunpacr and last t2 ttpacr.
+ */
+static void tt_insn_timing(uint8_t opcode, int tid, uint64_t start_ns, uint64_t end_ns) {
+    static int enabled = -1;
+    if (enabled < 0)
+        enabled = (getenv("TT_INSN_TIMING") != NULL);
+    if (!enabled) return;
+
+    uint64_t delta = end_ns - start_ns;
+    static uint64_t base_ns = 0;
+    static int tile = 0;
+    static bool in_tile = false;
+    static bool pending_end = false;
+    static int pending_tile = 0;
+    static uint64_t pending_end_ns = 0;
+    static char pending_end_wall[32] = {0};
+
+    const char *name = tt_insn_names[opcode];
+    if (!name) {
+        if (tt_insn_times[opcode] == 0) {
+            tt_insn_times[opcode] = delta;
+            if (delta >= 5000)
+                name = tt_insn_names[opcode] = tt_all_names[opcode];
+        }
+        if (!name) return;
+    }
+
+    if (!base_ns) base_ns = start_ns;
+
+    int is_unpack = (opcode == 0x42);
+    int is_pack   = (opcode == 0x41);
+
+    if (is_unpack && tid == 0 && !in_tile) {
+        if (pending_end) {
+            fprintf(stderr, "--- tile %d end    ms=%.3f  %s ---\n", pending_tile, (pending_end_ns - base_ns) / 1e6, pending_end_wall);
+            pending_end = false;
+        }
+        char wall[32];
+        tt_wall_str(wall, sizeof(wall));
+        in_tile = true;
+        tile++;
+        fprintf(stderr, "--- tile %d start  ms=%.3f  %s ---\n", tile, (start_ns - base_ns) / 1e6, wall);
+    }
+    if (opcode >= 0xa3 && opcode <= 0xa6) {
+        char wall[32];
+        tt_wall_str(wall, sizeof(wall));
+        fprintf(stderr, "[TT] t%d %-20s  ns=%6lu  ms=%.3f  %s\n",
+                tid, name, (unsigned long)delta, (start_ns - base_ns) / 1e6, wall);
+    } else {
+        fprintf(stderr, "[TT] t%d %-20s  ns=%6lu  ms=%.3f\n",
+                tid, name, (unsigned long)delta, (start_ns - base_ns) / 1e6);
+    }
+    if (is_pack && tid == 2) {
+        in_tile = false;
+        pending_end = true;
+        pending_tile = tile;
+        pending_end_ns = end_ns;
+        tt_wall_str(pending_end_wall, sizeof(pending_end_wall));
+    }
+}
+
+/* Rate-limited print for blocked ttsemwait: once per second per tid. */
+static void tt_insn_wait(uint8_t opcode, uint32_t imm, int tid) {
+    static int enabled = -1;
+    if (enabled < 0)
+        enabled = (getenv("TT_INSN_TIMING") != NULL);
+    if (!enabled) return;
+
+    static uint64_t last_ns[5] = {0};
+    static uint64_t base_ns = 0;
+    uint64_t now = tt_now_ns();
+    if (now - last_ns[tid] < 1000000000ULL) return;
+    last_ns[tid] = now;
+    if (!base_ns) base_ns = now;
+
+    char wall[32];
+    tt_wall_str(wall, sizeof(wall));
+    fprintf(stderr, "[WAIT] t%d %-20s  imm=0x%06X  ms=%.3f  %s\n",
+            tid, tt_all_names[opcode], imm, (now - base_ns) / 1e6, wall);
+}
+
 /* Execute an instruction using the jump table.
  * Returns true if completed, false if blocked/incomplete.
  */
@@ -192,14 +331,19 @@ bool tensix_execute_insn(tensix_t *tt, uint32_t insn, int tid)
 {
     uint8_t opcode = (insn >> 24) & 0xFF;
     uint32_t imm = insn & 0x00FFFFFF;
-
     insn_impl fn = tt_jump_table[opcode];
     if (fn == unimp) {
         fprintf(stderr, "!!! UNIMPLEMENTED TT INSN: reserved opcode=0x%02X tid=%d imm=0x%06X\n",
                 opcode, tid, imm);
         return true;
     }
-    return fn(tt, imm, tid);
+    uint64_t t0 = tt_now_ns();
+    bool result = fn(tt, imm, tid);
+    if (result)
+        tt_insn_timing(opcode, tid, t0, tt_now_ns());
+    else if (opcode == 0xa6)
+        tt_insn_wait(opcode, imm, tid);
+    return result;
 }
 
 /*
@@ -823,8 +967,53 @@ static bool ttapool3s2(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)im
 static bool ttgmpool(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
     report_unimpl(__func__, imm, tid); return true;
 }
-static bool ttgapool(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
-    report_unimpl(__func__, imm, tid); return true;
+static bool ttgapool(tensix_t *tt, uint32_t imm, int tid) {
+    /* GAPOOL: Dst[dest_base][j] += sum(k=0..15, SrcB[srcb_row][k] * SrcA[srca_row+k][j])
+     * Encoding: clear_dvalid<<22 | instr_mod19<<19 | pool_addr_mode<<15 | max_pool_index_en<<14 | dst<<0
+     * Writes 1 Dst row per call (firmware uses setrwc +16 between calls to step across faces).
+     * SrcA: 16×16 (rows srca_row..srca_row+15, 8-aligned)
+     * SrcB: row srcb_row (8-aligned), 16 elements used as the left vector in the dot product
+     */
+    if (!tt->srca_dvalid[tt->math_srca_bank]) return false;
+
+    uint32_t clear_dvalid = (imm >> 22) & 0x3;
+    uint32_t addr_mode    = (imm >> 15) & 0xF;
+    uint32_t dst_row      = imm & 0x3FFF;
+
+    bool flip_srca = clear_dvalid & 0x1;
+    bool flip_srcb = (clear_dvalid >> 1) & 0x1;
+
+    uint8_t ma_bank = tt->math_srca_bank;
+    uint8_t mb_bank = tt->math_srcb_bank;
+
+    uint32_t srca_row    = tt->srca_rwc[tid] & 0x38;          /* 8-row aligned */
+    uint32_t srcb_row    = tt->srcb_rwc[tid] & 0x38;          /* 8-row aligned */
+    uint32_t math_offset = tt->thd_reg[tid][1];
+    uint32_t dest_base   = (dst_row + math_offset + tt->dest_rwc[tid]) & 0x3FF;
+
+    if (dest_base < DEST_ROWS) {
+        for (unsigned j = 0; j < ROW_SIZE; j++) {
+            float sum = 0.0f;
+            for (unsigned k = 0; k < ROW_SIZE; k++) {
+                float a = (srca_row + k < SRCA_ROWS) ? tt->srca[ma_bank][srca_row + k][j] : 0.0f;
+                float b = (srcb_row     < SRCB_ROWS) ? tt->srcb[mb_bank][srcb_row][k]     : 0.0f;
+                sum += b * a;
+            }
+            tt->dest[dest_base][j] += sum;
+        }
+    }
+
+    if (flip_srca) {
+        tt->srca_dvalid[tt->math_srca_bank] = false;
+        tt->math_srca_bank ^= 1;
+    }
+    if (flip_srcb) {
+        tt->srcb_dvalid[tt->math_srcb_bank] = false;
+        tt->math_srcb_bank ^= 1;
+    }
+
+    apply_addr_mod(tt, addr_mode & 0x7, tid);
+    return true;
 }
 static bool ttgatesrcrst(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
     report_unimpl(__func__, imm, tid); return true;
@@ -1214,25 +1403,28 @@ static bool ttpacr(tensix_t *tt, uint32_t imm, int tid) {
     static const uint32_t pck_l1_cfg_idx[4]  = {69, 97, 117, 145};
     static const uint32_t pck_fmt_cfg_idx[4] = {70, 98, 118, 146};
 
-    /* Compute num_datums (shared across packers - same ADC, same x/y count) */
+    /* Compute num_datums from X counter range and Y increment.
+     * ISA InputNumDatums = ch1.X - ch0.X + 1 per row; firmware encodes the
+     * per-call row count in YsrcIncr.  The emulator reads a 2D block:
+     * y_count rows of x_count columns per PACR. */
     uint32_t num_datums;
     if (flush) {
         num_datums = 0;
     } else {
         uint32_t x_count = (adc->ch1_x >= adc->ch0_x) ? (adc->ch1_x - adc->ch0_x + 1) : 0;
-        uint32_t pack_reg0 = tt->thd_reg[tid][37]; /* always addr_mod[0] */
+        uint32_t pack_reg0 = tt->thd_reg[tid][37];
         uint32_t ysrc_incr0 = pack_reg0 & 0xF;
         uint32_t y_count = (ysrc_incr0 > 0) ? ysrc_incr0 : 1;
         num_datums = x_count * y_count;
     }
     if (num_datums > 1024) num_datums = 1024;
 
-    /* In FP32 mode the emulator writes complete datums for each packer call.
-     * Even-numbered packers (0,2) handle bytes {0,2} and odd-numbered (1,3)
-     * handle bytes {1,3} of each FP32.  Since the emulator writes the full
-     * 4-byte datum on the even-packer pass, skip the L1 write (and offset
-     * advance) when only odd packers are selected. */
-    if ((read_intf_sel & 0x5) == 0) num_datums = 0;
+    /* Tilize FP32 uses alternating masks: _0th_AND_2nd_INTF_ACTIVE (0x5) for the
+     * first pass and _1st_AND_3rd_INTF_ACTIVE (0xA) for the second pass.  The
+     * emulator writes complete datums on the first (0x5) pass; suppress the second
+     * (0xA) pass to avoid double-advancing the L1 write offset.  Only apply in
+     * DST_ACCESS_NORMAL_MODE — strided mode uses distinct per-packer faces. */
+    if (!dst_access_mode && read_intf_sel == 0xA) num_datums = 0;
 
     /* L1 base address for packer 0 (advances via pack_l1_write_offset) */
     uint32_t l1_byte_addr_p0 = l1_base_byte_addr + tt->pack_l1_write_offset;
@@ -1288,32 +1480,87 @@ static bool ttpacr(tensix_t *tt, uint32_t imm, int tid) {
 
         if (tt->mem.l1_scratchpad == NULL || num_datums == 0) continue;
 
-        /* Read 2D block from Dest and write to L1.
-         * Dest is 16 columns wide; one row = 16 datums.
-         */
+        /* Read 2D block from Dest: y_count rows of x_count columns per PACR.
+         * Dest is 16 columns wide; row = idx>>4, col = idx&0xf. */
         uint32_t pack_reg0 = tt->thd_reg[tid][37];
         uint32_t ysrc_incr0 = pack_reg0 & 0xF;
         uint32_t y_count = (ysrc_incr0 > 0) ? ysrc_incr0 : 1;
         uint32_t x_count = (num_datums > 0) ? num_datums / y_count : 0;
 
-        uint32_t l1_idx = 0;
-        for (uint32_t row = 0; row < y_count; row++) {
-            for (uint32_t col = 0; col < x_count; col++) {
-                uint32_t d_idx = src_addr_p + row * 16 + col;
-                uint32_t d_row = (d_idx >> 4) & 0x3FF;
-                uint32_t d_col = d_idx & 0xF;
-
-                float val = 0.0f;
-                if (!zero_write && d_row < DEST_ROWS) {
-                    val = tt->dest[d_row][d_col];
+        if (out_data_fmt == 6 || out_data_fmt == 2) {
+            /* Bfp8_b (6) / Bfp8 (2): block float encoding.
+             * L1 tile layout: [64 exp bytes][1024 mantissa bytes].
+             * Each 16 consecutive output datums share one exponent byte.
+             * exp section:      l1_base + group_index (0..63)
+             * mantissa section: l1_base + 64 + linear_datum_index (0..1023) */
+            float bvals[1024];
+            uint32_t bn = 0;
+            for (uint32_t row = 0; row < y_count; row++) {
+                for (uint32_t col = 0; col < x_count; col++) {
+                    uint32_t d_idx = src_addr_p + row * 16 + col;
+                    uint32_t d_row = (d_idx >> 4) & 0x3FF;
+                    uint32_t d_col = d_idx & 0xF;
+                    bvals[bn++] = (!zero_write && d_row < DEST_ROWS)
+                                  ? tt->dest[d_row][d_col] : 0.0f;
                 }
-
-                uint32_t raw = float_to_datum(val, out_data_fmt);
-                uint32_t l1_off = l1_byte_addr_p + l1_idx * out_dsb;
-                if (l1_off + out_dsb <= 0x180000) {
-                    memcpy(tt->mem.l1_scratchpad + l1_off, &raw, out_dsb);
+            }
+            /* tile_off: byte offset of this packer's data within the tile mantissa
+             * region (before the +64 adjustment).  Equals pack_l1_write_offset +
+             * active_idx * num_datums for out_dsb=1. */
+            uint32_t tile_off = l1_byte_addr_p - l1_base_byte_addr;
+            for (uint32_t gi = 0; gi < num_datums; gi += 16) {
+                uint32_t gend = (gi + 16u <= num_datums) ? gi + 16u : num_datums;
+                /* shared exponent = max biased IEEE-754 exponent in the group */
+                uint32_t shared_exp = 0;
+                for (uint32_t k = gi; k < gend; k++) {
+                    uint32_t b; memcpy(&b, &bvals[k], 4);
+                    uint32_t e = (b >> 23) & 0xFFu;
+                    if (e > shared_exp) shared_exp = e;
                 }
-                l1_idx++;
+                uint32_t exp_addr = l1_base_byte_addr + (tile_off + gi) / 16u;
+                if (exp_addr < 0x180000u)
+                    tt->mem.l1_scratchpad[exp_addr] = (uint8_t)shared_exp;
+                for (uint32_t k = gi; k < gend; k++) {
+                    uint32_t b; memcpy(&b, &bvals[k], 4);
+                    uint32_t mant = b & 0x7FFFFFu;
+                    uint32_t exp  = (b >> 23) & 0xFFu;
+                    uint32_t sign = (b >> 31) & 1u;
+                    if (exp == 0) {
+                        mant = 0; sign = 0;
+                    } else {
+                        mant = (1u << 23) | mant;
+                        uint32_t diff = (shared_exp > exp) ? (shared_exp - exp) : 0u;
+                        while (diff > 31) { mant >>= 31; diff -= 31; }
+                        mant >>= diff;
+                        mant >>= 17; /* MANTISSA_BFP_SHIFT = 24 - 7 */
+                        if (mant > 127u) mant = 127u;
+                        if (mant == 0) sign = 0;
+                    }
+                    uint32_t mant_addr = l1_base_byte_addr + 64u + tile_off + k;
+                    if (mant_addr < 0x180000u)
+                        tt->mem.l1_scratchpad[mant_addr] = (uint8_t)((sign << 7) | mant);
+                }
+            }
+        } else {
+            uint32_t l1_idx = 0;
+            for (uint32_t row = 0; row < y_count; row++) {
+                for (uint32_t col = 0; col < x_count; col++) {
+                    uint32_t d_idx = src_addr_p + row * 16 + col;
+                    uint32_t d_row = (d_idx >> 4) & 0x3FF;
+                    uint32_t d_col = d_idx & 0xF;
+
+                    float val = 0.0f;
+                    if (!zero_write && d_row < DEST_ROWS) {
+                        val = tt->dest[d_row][d_col];
+                    }
+
+                    uint32_t raw = float_to_datum(val, out_data_fmt);
+                    uint32_t l1_off = l1_byte_addr_p + l1_idx * out_dsb;
+                    if (l1_off + out_dsb <= 0x180000) {
+                        memcpy(tt->mem.l1_scratchpad + l1_off, &raw, out_dsb);
+                    }
+                    l1_idx++;
+                }
             }
         }
     }
@@ -1600,7 +1847,10 @@ static bool ttunpacr(tensix_t *tt, uint32_t imm, int tid) {
             bool has_raw = false;
 
             if (!zero_write) {
-                uint32_t l1_byte;
+                /* 0x200000 acts as an out-of-bounds sentinel: the final bounds check
+                 * (l1_byte + dsb <= 0x180000) will be false, skipping the generic
+                 * read/decode path when the Bfp8_b branch already decoded val. */
+                uint32_t l1_byte = 0x200000u;
                 if (tileize_mode && shift_amount > 0) {
                     /* Scatter: map output datum index i (face-major) to L1 (row-major).
                      * UNPACR may be called multiple times (z-inc MOP): each call covers
@@ -1625,6 +1875,31 @@ static bool ttunpacr(tensix_t *tt, uint32_t imm, int tid) {
                     uint32_t global_col   = face_col * face_c + col_in_face;
                     l1_byte = in_addr + global_row * tile_row_bytes + global_col * dsb;
 
+                } else if (in_data_fmt == 6 || in_data_fmt == 2) {
+                    /* Bfp8_b (6) / Bfp8 (2): face-split tile layout.
+                     * L1: [face0_exp(16B)][face1_exp(16B)][face2_exp(16B)][face3_exp(16B)]
+                     *     [face0_mant(256B)][face1_mant(256B)]...
+                     * datum e: face=e/256, pos=e%256, row=pos/16
+                     *   exp  at in_addr + face*16 + row
+                     *   mant at in_addr + 64 + face*256 + pos */
+                    uint32_t e    = first_datum + i;
+                    uint32_t face = e / 256u;
+                    uint32_t pos  = e % 256u;
+                    uint32_t row  = pos / 16u;
+                    uint32_t exp_a  = in_addr + face * 16u + row;
+                    uint32_t mant_a = in_addr + 64u + face * 256u + pos;
+                    if (exp_a < 0x180000u && mant_a < 0x180000u) {
+                        uint32_t sh_exp = tt->mem.l1_scratchpad[exp_a];
+                        uint32_t mant_b = tt->mem.l1_scratchpad[mant_a];
+                        uint32_t sign7  = mant_b >> 7;
+                        uint32_t mant7  = mant_b & 0x7Fu;
+                        if (mant7 != 0u && sh_exp != 0u) {
+                            uint32_t fp32 = (sign7 << 31) | (sh_exp << 23) |
+                                            ((mant7 << 17) & 0x7FFFFFu);
+                            memcpy(&val, &fp32, 4);
+                        }
+                        has_raw = true;
+                    }
                 } else {
                     l1_byte = in_addr_datums + i * dsb;
                 }
