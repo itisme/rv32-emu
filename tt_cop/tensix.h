@@ -330,8 +330,8 @@ struct tensix {
      * Unpacker tracks its current bank; math unit tracks its current bank. */
     float srca[2][SRCA_ROWS][ROW_SIZE];
     float srcb[2][SRCB_ROWS][ROW_SIZE];
-    bool srca_dvalid[2];   /* per-bank: true=MatrixUnit owns, false=Unpacker owns */
-    bool srcb_dvalid[2];
+    volatile bool srca_dvalid[2];   /* per-bank: true=MatrixUnit owns, false=Unpacker owns */
+    volatile bool srcb_dvalid[2];
     bool srcb_zeroed[2];   /* true if bank was zeroed by ZEROSRC and not yet written by real UNPACR */
 
     /* SFPU PRNG state (32 lanes, per VectorUnit.md) */

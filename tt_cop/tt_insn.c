@@ -532,8 +532,56 @@ static bool ttreplay(tensix_t *tt, uint32_t imm, int tid) {
 static bool ttresourcedecl(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
     report_unimpl(__func__, imm, tid); return true;
 }
-static bool ttmovd2a(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
-    report_unimpl(__func__, imm, tid); return true;
+static bool ttmovd2a(tensix_t *tt, uint32_t imm, int tid) {
+    /* TT_OP_MOVD2A(dest_32b_lo, src, addr_mode, instr_mod, dst)
+     * Encoding: dest_32b_lo<<23 | src<<17 | addr_mode<<14 | instr_mod<<12 | dst<<0
+     *
+     * ISA (MOVD2A.md): Move 1 or 4 rows from Dst to SrcA.
+     *   dest_32b_lo: read from 32-bit Dst (rare)
+     *   src[5:0]: SrcRow base (target in SrcA)
+     *   addr_mode[2:0]: AddrMod index
+     *   instr_mod[1:0]: (Move4Rows)<<1, so Move4Rows = instr_mod>>1
+     *   dst[11:0]: DstRow base (source from Dest)
+     */
+    uint32_t addr_mode = (imm >> 14) & 0x7;
+    uint32_t instr_mod = (imm >> 12) & 0x3;
+    uint32_t move4rows = (instr_mod >> 1) & 0x1;
+    uint32_t src_row   = (imm >> 17) & 0x3F;
+    uint32_t dst_row   = imm & 0xFFF;
+
+    uint32_t math_offset = tt->thd_reg[tid][1];
+    uint32_t dest_base   = dst_row + math_offset + tt->dest_rwc[tid];
+    uint32_t srca_row    = src_row + tt->srca_rwc[tid];
+
+    unsigned num_rows;
+    if (move4rows) {
+        num_rows  = 4;
+        dest_base &= 0x3FC;
+        srca_row  &= 0x3C;
+    } else {
+        num_rows  = 1;
+        dest_base &= 0x3FF;
+        srca_row  &= 0x3F;
+    }
+
+    uint8_t bank = tt->math_srca_bank;
+
+    for (unsigned i = 0; i < num_rows; i++) {
+        uint32_t d_idx = dest_base + i;
+        uint32_t s_idx = srca_row + i;
+        if (d_idx >= DEST_ROWS || s_idx >= SRCA_ROWS)
+            continue;
+        for (int j = 0; j < ROW_SIZE; j++)
+            tt->srca[bank][s_idx][j] = tt->dest[d_idx][j];
+    }
+
+    tt->srca_dvalid[bank] = true;
+
+    TT_DBG("[MOVD2A] dest_base=%d, srca_row=%d, num_rows=%d, bank=%d\n",
+           dest_base, srca_row, num_rows, bank);
+
+    apply_addr_mod(tt, addr_mode, tid);
+    return true;
 }
 static bool ttmovdbga2d(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
     report_unimpl(__func__, imm, tid); return true;
@@ -579,7 +627,10 @@ static bool ttzeroacc(tensix_t *tt, uint32_t imm, int tid) {
     }
     case 1: /* 16_ROWS */
     {
-        uint32_t base = where & 0xFF;
+        /* Imm10 is a face-relative index; hardware adds math_offset in face units */
+        uint32_t math_offset = tt->thd_reg[tid][1];
+        uint32_t face_offset = use_32b ? (math_offset / 32) : (math_offset / 16);
+        uint32_t base = (where & 0xFF) + face_offset;
         uint32_t start = use_32b ? (base * 32) : (base * 16);
         for (uint32_t i = 0; i < 16 && (start + i) < DEST_ROWS; i++) {
             for (int j = 0; j < ROW_SIZE; j++)
@@ -844,13 +895,105 @@ mvmul_skip_compute:
     apply_addr_mod(tt, addr_mode & 0x7, tid);
     return true;
 }
-static bool ttelwmul(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
-    report_unimpl(__func__, imm, tid); return true;
+/* Apply fidelity-phase mantissa masking to SrcA/SrcB before multiplying.
+ * Phase bit0 selects which SrcA mantissa slice; bit1 selects SrcB slice.
+ * Four phases together cover the full mantissa product (per ELWMUL.md). */
+static inline float elwmul_srca_bits(float x, int phase)
+{
+    union { uint32_t u; float f; } b;
+    b.f = x;
+    if ((phase & 1) == 0) {
+        b.u &= 0xfff80000u;   /* sign + exp + top-4 mantissa bits */
+        return b.f;
+    } else {
+        uint32_t hi; union { uint32_t u; float f; } h;
+        hi = b.u & 0xfff83fffu;  /* sign + exp + top-4 + low-14 mantissa */
+        h.u = hi;
+        return x - h.f;          /* isolates next-5 mantissa bits [18:14] */
+    }
+}
+static inline float elwmul_srcb_bits(float x, int phase)
+{
+    union { uint32_t u; float f; } b;
+    b.f = x;
+    if ((phase & 2) == 0) {
+        b.u &= 0xfffe0000u;   /* sign + exp + top-6 mantissa bits */
+        return b.f;
+    } else {
+        uint32_t hi; union { uint32_t u; float f; } h;
+        hi = b.u & 0xfffe1fffu;  /* sign + exp + top-6 + low-13 mantissa */
+        h.u = hi;
+        return x - h.f;          /* isolates next-4 mantissa bits [16:13] */
+    }
+}
+
+static bool ttelwmul(tensix_t *tt, uint32_t imm, int tid) {
+    /* ISA: Dst += SrcA * SrcB, dest_accum always true (no non-accumulate mode).
+     * clear_dvalid[1:0]: bit0=FlipSrcA, bit1=FlipSrcB
+     * instr_mod19[1:0]: bit1=BroadcastSrcBRow, bit0=BroadcastSrcBCol0
+     * addr_mode[2:0]: AddrMod index; dst[13:0]: DstRow base
+     * Each call uses the current fidelity phase to select which mantissa slice
+     * of SrcA/SrcB to multiply; four phases accumulate to the full product.
+     */
+    if (!tt->srca_dvalid[tt->math_srca_bank])
+        return false;
+    if (!tt->srcb_dvalid[tt->math_srcb_bank])
+        return false;
+
+    uint32_t clear_dvalid = (imm >> 22) & 0x3;
+    uint32_t instr_mod19  = (imm >> 19) & 0x3;
+    uint32_t addr_mode    = (imm >> 14) & 0x7;
+    uint32_t dst_row      = imm & 0x3FFF;
+
+    bool flip_srca       = clear_dvalid & 0x1;
+    bool flip_srcb       = (clear_dvalid >> 1) & 0x1;
+    bool bcast_srcb_row  = (instr_mod19 >> 1) & 0x1;
+    bool bcast_srcb_col0 = instr_mod19 & 0x1;
+
+    uint32_t srca_row  = tt->srca_rwc[tid] & 0x38;
+    uint32_t srcb_row  = tt->srcb_rwc[tid] & (bcast_srcb_row ? 0x3F : 0x38);
+    uint32_t math_offset = tt->thd_reg[tid][1];
+    uint32_t dest_base = (dst_row + tt->dest_rwc[tid] + math_offset) & 0x3F8;
+
+    uint8_t ma_bank = tt->math_srca_bank;
+    uint8_t mb_bank = tt->math_srcb_bank;
+    int fid = (int)(tt->fidelity[tid] & 3);
+    TT_DBG("[ELWMUL] srca_row=%d, srcb_row=%d, dest_base=%d, bank_a=%d, bank_b=%d fid=%d\n",
+           srca_row, srcb_row, dest_base, ma_bank, mb_bank, fid);
+
+    for (int i = 0; i < 8; i++) {
+        uint32_t sa_idx = srca_row + i;
+        uint32_t sb_idx = srcb_row + (bcast_srcb_row ? 0 : i);
+        uint32_t d_idx  = dest_base + i;
+
+        if (sa_idx >= SRCA_ROWS || sb_idx >= SRCB_ROWS || d_idx >= DEST_ROWS)
+            continue;
+
+        for (int j = 0; j < ROW_SIZE; j++) {
+            float a_val = elwmul_srca_bits(tt->srca[ma_bank][sa_idx][j], fid);
+            float b_val = elwmul_srcb_bits(tt->srcb[mb_bank][sb_idx][bcast_srcb_col0 ? 0 : j], fid);
+            tt->dest[d_idx][j] += a_val * b_val;
+        }
+    }
+
+    if (flip_srca) {
+        tt->srca_dvalid[tt->math_srca_bank] = false;
+        tt->math_srca_bank ^= 1;
+    }
+    if (flip_srcb) {
+        tt->srcb_dvalid[tt->math_srcb_bank] = false;
+        tt->math_srcb_bank ^= 1;
+    }
+
+    apply_addr_mod(tt, addr_mode, tid);
+    return true;
 }
 static bool ttelwadd(tensix_t *tt, uint32_t imm, int tid) {
     /* ISA auto-wait: wait for SrcA and SrcB banks to be owned by MatrixUnit */
-    if (!tt->srca_dvalid[tt->math_srca_bank]) return false;
-    if (!tt->srcb_dvalid[tt->math_srcb_bank]) return false;
+    if (!tt->srca_dvalid[tt->math_srca_bank])
+        return false;
+    if (!tt->srcb_dvalid[tt->math_srcb_bank])
+        return false;
 
     /* ckernel_ops.h: TT_OP_ELWADD(clear_dvalid, dest_accum_en, instr_mod19, addr_mode, dst)
      * Encoding: clear_dvalid<<22 | dest_accum_en<<21 | instr_mod19<<19 | addr_mode<<14 | dst<<0
@@ -955,8 +1098,64 @@ static bool ttelwadd(tensix_t *tt, uint32_t imm, int tid) {
 static bool ttdotpv(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
     report_unimpl(__func__, imm, tid); return true;
 }
-static bool ttelwsub(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
-    report_unimpl(__func__, imm, tid); return true;
+static bool ttelwsub(tensix_t *tt, uint32_t imm, int tid) {
+    if (!tt->srca_dvalid[tt->math_srca_bank])
+        return false;
+    if (!tt->srcb_dvalid[tt->math_srcb_bank])
+        return false;
+
+    uint32_t clear_dvalid = (imm >> 22) & 0x3;
+    uint32_t dest_accum   = (imm >> 21) & 0x1;
+    uint32_t instr_mod19  = (imm >> 19) & 0x3;
+    uint32_t addr_mode    = (imm >> 14) & 0x7;
+    uint32_t dst_row      = imm & 0x3FFF;
+
+    bool flip_srca       = clear_dvalid & 0x1;
+    bool flip_srcb       = (clear_dvalid >> 1) & 0x1;
+    bool bcast_srcb_row  = (instr_mod19 >> 1) & 0x1;
+    bool bcast_srcb_col0 = instr_mod19 & 0x1;
+
+    uint32_t srca_row  = tt->srca_rwc[tid] & 0x38;
+    uint32_t srcb_row  = tt->srcb_rwc[tid] & (bcast_srcb_row ? 0x3F : 0x38);
+    uint32_t math_offset = tt->thd_reg[tid][1];
+    uint32_t dest_base = (dst_row + tt->dest_rwc[tid] + math_offset) & 0x3F8;
+
+    uint8_t ma_bank = tt->math_srca_bank;
+    uint8_t mb_bank = tt->math_srcb_bank;
+    TT_DBG("[ELWSUB] srca_row=%d, srcb_row=%d, dest_base=%d, bank_a=%d, bank_b=%d\n",
+           srca_row, srcb_row, dest_base, ma_bank, mb_bank);
+
+    for (int i = 0; i < 8; i++) {
+        uint32_t sa_idx = srca_row + i;
+        uint32_t sb_idx = srcb_row + (bcast_srcb_row ? 0 : i);
+        uint32_t d_idx  = dest_base + i;
+
+        if (sa_idx >= SRCA_ROWS || sb_idx >= SRCB_ROWS || d_idx >= DEST_ROWS)
+            continue;
+
+        for (int j = 0; j < ROW_SIZE; j++) {
+            float a_val = tt->srca[ma_bank][sa_idx][j];
+            float b_val = tt->srcb[mb_bank][sb_idx][bcast_srcb_col0 ? 0 : j];
+            float result = a_val - b_val;
+
+            if (dest_accum)
+                result += tt->dest[d_idx][j];
+
+            tt->dest[d_idx][j] = result;
+        }
+    }
+
+    if (flip_srca) {
+        tt->srca_dvalid[tt->math_srca_bank] = false;
+        tt->math_srca_bank ^= 1;
+    }
+    if (flip_srcb) {
+        tt->srcb_dvalid[tt->math_srcb_bank] = false;
+        tt->math_srcb_bank ^= 1;
+    }
+
+    apply_addr_mod(tt, addr_mode, tid);
+    return true;
 }
 static bool ttmpool3s2(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
     report_unimpl(__func__, imm, tid); return true;
@@ -1068,6 +1267,16 @@ static bool ttsetrwc(tensix_t *tt, uint32_t imm, int tid) {
     uint32_t rwc_b        = (imm >> 10) & 0xF;
     uint32_t rwc_a        = (imm >>  6) & 0xF;
     uint32_t bitmask      = imm & 0x3F;
+
+    /* When CLR_A/CLR_B is set, the hardware MOP controller guarantees that
+     * T0's UNPACR for the same face has already fired (setting dvalid) before
+     * T1's end_op SETRWC runs.  In our threaded emulator threads run
+     * concurrently, so spin-wait here to reproduce that ordering guarantee.
+     * Without this, T1's SETRWC can fire before T0's UNPACR, missing a bank
+     * flip and leaving math_srcb_bank/math_srca_bank desynced from the
+     * unpacker. */
+    if ((clear_ab_vld & 0x1) && !tt->srca_dvalid[tt->math_srca_bank]) return false;
+    if ((clear_ab_vld & 0x2) && !tt->srcb_dvalid[tt->math_srcb_bank]) return false;
 
     if (bitmask & 0x1) {  /* SrcA */
         uint32_t val = rwc_a;
