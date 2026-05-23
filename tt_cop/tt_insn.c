@@ -456,6 +456,32 @@ static bool ttnop(tensix_t *tt, uint32_t imm, int tid) {
     return true;
 }
 
+/* Print mop_cfg for a thread when it has changed since last call.
+ * Controlled by TT_MOP_CFG_PRINT env var (non-zero = enabled).
+ * Call at the start of ttmop to observe active config before expansion.
+ */
+static void print_mop_cfg_if_changed(tensix_t *tt, int tid) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *e = getenv("TT_MOP_CFG_PRINT");
+        enabled = (e && e[0] != '0') ? 1 : 0;
+    }
+    if (!enabled) return;
+    if (!tt->cop) return;
+
+    static uint32_t last_cfg[3][9];
+    static bool first[3] = {true, true, true};
+
+    uint32_t *cfg = tt->cop->threads[tid].mop_cfg;
+    if (first[tid] || memcmp(last_cfg[tid], cfg, 9 * sizeof(uint32_t)) != 0) {
+        fprintf(stderr, "[MOP_CFG] tid=%d cfg=[0x%x,0x%x,0x%x,0x%x,0x%x,0x%x,0x%x,0x%x,0x%x]\n",
+                tid, cfg[0], cfg[1], cfg[2], cfg[3], cfg[4],
+                cfg[5], cfg[6], cfg[7], cfg[8]);
+        memcpy(last_cfg[tid], cfg, 9 * sizeof(uint32_t));
+        first[tid] = false;
+    }
+}
+
 /* MOP_CFG (0x03): Configure MOP registers
  * Encoding: cfg_idx[23:20] | cfg_value[19:0]
  * cfg_idx 0-8: Set mop_cfg[idx] = cfg_value
@@ -485,6 +511,7 @@ static bool ttmop_cfg(tensix_t *tt, uint32_t imm, int tid) {
 static bool ttmop(tensix_t *tt, uint32_t imm, int tid) {
     if (!tt->cop) return true;
 
+    /* print_mop_cfg_if_changed(tt, tid); */
     int thread_id = tid;
     TT_DBG("[MOP] Expanding MOP, param=0x%06x, thread=%d\n", imm, thread_id);
     tensix_cop_mop_expand(tt->cop, thread_id, imm);
@@ -586,11 +613,101 @@ static bool ttmovd2a(tensix_t *tt, uint32_t imm, int tid) {
 static bool ttmovdbga2d(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
     report_unimpl(__func__, imm, tid); return true;
 }
-static bool ttmovd2b(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
-    report_unimpl(__func__, imm, tid); return true;
+static bool ttmovd2b(tensix_t *tt, uint32_t imm, int tid) {
+    /* TT_OP_MOVD2B(dest_32b_lo, src, addr_mode, instr_mod, dst)
+     * Encoding: dest_32b_lo<<23 | src<<17 | addr_mode<<14 | instr_mod<<12 | dst<<0
+     * Move 1 or 4 rows from Dest to SrcB.
+     *   src[5:0]: SrcRow base (target in SrcB)
+     *   dst[11:0]: DstRow base (source from Dest)
+     *   instr_mod>>1 = Move4Rows
+     */
+    uint32_t addr_mode = (imm >> 14) & 0x7;
+    uint32_t instr_mod = (imm >> 12) & 0x3;
+    uint32_t move4rows = (instr_mod >> 1) & 0x1;
+    uint32_t src_row   = (imm >> 17) & 0x3F;
+    uint32_t dst_row   = imm & 0xFFF;
+
+    uint32_t math_offset = tt->thd_reg[tid][1];
+    uint32_t dest_base   = dst_row + math_offset + tt->dest_rwc[tid];
+    uint32_t srcb_row    = src_row + tt->srcb_rwc[tid];
+
+    unsigned num_rows;
+    if (move4rows) {
+        num_rows  = 4;
+        dest_base &= 0x3FC;
+        srcb_row  &= 0x3C;
+    } else {
+        num_rows  = 1;
+        dest_base &= 0x3FF;
+        srcb_row  &= 0x3F;
+    }
+
+    uint8_t bank = tt->math_srcb_bank;
+
+    for (unsigned i = 0; i < num_rows; i++) {
+        uint32_t d_idx = dest_base + i;
+        uint32_t s_idx = srcb_row + i;
+        if (d_idx >= DEST_ROWS || s_idx >= SRCB_ROWS)
+            continue;
+        for (int j = 0; j < ROW_SIZE; j++)
+            tt->srcb[bank][s_idx][j] = tt->dest[d_idx][j];
+    }
+
+    tt->srcb_dvalid[bank] = true;
+
+    TT_DBG("[MOVD2B] dest_base=%d, srcb_row=%d, num_rows=%d, bank=%d\n",
+           dest_base, srcb_row, num_rows, bank);
+
+    apply_addr_mod(tt, addr_mode, tid);
+    return true;
 }
-static bool ttmovb2a(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
-    report_unimpl(__func__, imm, tid); return true;
+static bool ttmovb2a(tensix_t *tt, uint32_t imm, int tid) {
+    /* TT_OP_MOVB2A(srca, addr_mode, instr_mod, srcb)
+     * Encoding: srca<<17 | addr_mode<<14 | instr_mod<<12 | srcb<<0
+     * Move 1 or 4 rows from SrcB to SrcA.
+     *   srca[5:0]: SrcARow base (target in SrcA)
+     *   srcb[5:0]: SrcBRow base (source from SrcB)
+     *   instr_mod>>1 = Move4Rows
+     */
+    uint32_t addr_mode = (imm >> 14) & 0x7;
+    uint32_t instr_mod = (imm >> 12) & 0x3;
+    uint32_t move4rows = (instr_mod >> 1) & 0x1;
+    uint32_t srca_row  = (imm >> 17) & 0x3F;
+    uint32_t srcb_row  = imm & 0x3F;
+
+    srca_row += tt->srca_rwc[tid];
+    srcb_row += tt->srcb_rwc[tid];
+
+    unsigned num_rows;
+    if (move4rows) {
+        num_rows = 4;
+        srca_row &= 0x3C;
+        srcb_row &= 0x3C;
+    } else {
+        num_rows = 1;
+        srca_row &= 0x3F;
+        srcb_row &= 0x3F;
+    }
+
+    uint8_t banka = tt->math_srca_bank;
+    uint8_t bankb = tt->math_srcb_bank;
+
+    for (unsigned i = 0; i < num_rows; i++) {
+        uint32_t a_idx = srca_row + i;
+        uint32_t b_idx = srcb_row + i;
+        if (a_idx >= SRCA_ROWS || b_idx >= SRCB_ROWS)
+            continue;
+        for (int j = 0; j < ROW_SIZE; j++)
+            tt->srca[banka][a_idx][j] = tt->srcb[bankb][b_idx][j];
+    }
+
+    tt->srca_dvalid[banka] = true;
+
+    TT_DBG("[MOVB2A] srca_row=%d, srcb_row=%d, num_rows=%d, banka=%d bankb=%d\n",
+           srca_row, srcb_row, num_rows, banka, bankb);
+
+    apply_addr_mod(tt, addr_mode, tid);
+    return true;
 }
 static bool ttmovdbgb2d(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
     report_unimpl(__func__, imm, tid); return true;
@@ -756,8 +873,52 @@ static bool ttmova2d(tensix_t *tt, uint32_t imm, int tid) {
     apply_addr_mod(tt, addr_mode, tid);
     return true;
 }
-static bool ttmovb2d(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
-    report_unimpl(__func__, imm, tid); return true;
+static bool ttmovb2d(tensix_t *tt, uint32_t imm, int tid) {
+    /* TT_OP_MOVB2D(dest_32b_lo, src, addr_mode, movb2d_instr_mod, dst)
+     * Encoding: dest_32b_lo<<23 | src<<17 | addr_mode<<14 | movb2d_instr_mod<<11 | dst<<0
+     * Move rows from SrcB to Dest.
+     *   src[5:0]: SrcRow base (source in SrcB)
+     *   movb2d_instr_mod[2:0]: bit2=Move4Rows, bit1=Broadcast1RowTo8, bit0=BroadcastCol0
+     *   dst[10:0]: DstRow base (target in Dest)
+     */
+    uint32_t addr_mode    = (imm >> 14) & 0x7;
+    uint32_t instr_mod    = (imm >> 11) & 0x7;
+    uint32_t move4rows    = (instr_mod >> 2) & 0x1;
+    uint32_t src_row      = (imm >> 17) & 0x3F;
+    uint32_t dst_row      = imm & 0x7FF;
+
+    uint32_t math_offset = tt->thd_reg[tid][1];
+    uint32_t dest_base   = dst_row + math_offset + tt->dest_rwc[tid];
+    uint32_t srcb_row    = src_row + tt->srcb_rwc[tid];
+
+    unsigned num_rows;
+    if (move4rows) {
+        num_rows  = 4;
+        dest_base &= 0x3FC;
+        srcb_row  &= 0x3C;
+    } else {
+        num_rows  = 1;
+        dest_base &= 0x3FF;
+        srcb_row  &= 0x3F;
+    }
+
+    uint8_t bank = tt->math_srcb_bank;
+
+    for (unsigned i = 0; i < num_rows; i++) {
+        uint32_t d_idx = dest_base + i;
+        uint32_t s_idx = srcb_row + i;
+        if (d_idx >= DEST_ROWS || s_idx >= SRCB_ROWS)
+            continue;
+        for (int j = 0; j < ROW_SIZE; j++)
+            tt->dest[d_idx][j] = tt->srcb[bank][s_idx][j];
+    }
+
+
+    TT_DBG("[MOVB2D] srcb_row=%d, dest_base=%d, num_rows=%d, bank=%d\n",
+           srcb_row, dest_base, num_rows, bank);
+
+    apply_addr_mod(tt, addr_mode, tid);
+    return true;
 }
 static bool tttrnspsrca(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
     report_unimpl(__func__, imm, tid); return true;
@@ -765,8 +926,22 @@ static bool tttrnspsrca(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)i
 static bool ttrareb(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
     report_unimpl(__func__, imm, tid); return true;
 }
-static bool tttrnspsrcb(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
-    report_unimpl(__func__, imm, tid); return true;
+static bool tttrnspsrcb(tensix_t *tt, uint32_t imm, int tid) {
+    /* TTI_TRNSPSRCB: Transpose the 16x16 matrix in SrcB rows 16..31 in-place. */
+    (void)imm;
+    uint8_t bank = tt->math_srcb_bank;
+    const uint32_t row_base = 16;
+
+    for (unsigned i = 0; i < 16; i++) {
+        for (unsigned j = 0; j < i; j++) {
+            float tmp = tt->srcb[bank][row_base + i][j];
+            tt->srcb[bank][row_base + i][j] = tt->srcb[bank][row_base + j][i];
+            tt->srcb[bank][row_base + j][i] = tmp;
+        }
+    }
+
+    TT_DBG("[TRNSPSRCB] bank=%d, transposed rows 16..31\n", bank);
+    return true;
 }
 static bool ttshiftxa(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
     report_unimpl(__func__, imm, tid); return true;
@@ -1948,6 +2123,8 @@ static bool ttunpacr(tensix_t *tt, uint32_t imm, int tid) {
     /* Out data format for output address conversion */
     uint32_t out_data_fmt = reg2_val & 0xF;
     bool ovrd_data_format = ((reg2_val >> 12) & 0x1) != 0;
+    /* Haloize_mode (bit 8): within-face 16x16 transpose when writing to SrcA */
+    bool haloize_mode = (reg2_val >> 8) & 0x1;
     /* Tileize mode: scatter row-major L1 input to face-major SrcA output.
      * shift_amount encodes the per-row L1 stride in units of 16 bytes. */
     bool tileize_mode = (reg2_val >> 9) & 0x1;
@@ -2158,6 +2335,12 @@ static bool ttunpacr(tensix_t *tt, uint32_t imm, int tid) {
                 }
             } else {
                 /* Write to SrcA (current unpacker bank) */
+                if (haloize_mode) {
+                    /* Within-face 16x16 transpose: swap low 4 bits of row with col */
+                    uint32_t row_low = row & 0xf;
+                    uint32_t tmp = row_low; row_low = col; col = tmp;
+                    row = (row & ~0xfU) | row_low;
+                }
                 row = row & 0x3F;
                 if (row < SRCA_ROWS)
                     tt->srca[tt->unp_srca_bank][row][col] = val;
