@@ -1462,8 +1462,11 @@ static float datum_to_float(uint32_t bits, uint32_t fmt)
         return (float)(uint16_t)bits;
     case 12: /* Int16 */
         return (float)(int16_t)(uint16_t)bits;
-    case 14: /* Int8 */
-        return (float)(int8_t)(uint8_t)bits;
+    case 14: /* Int8 sign-magnitude: bit7=sign, bits[6:0]=magnitude */
+    {
+        uint8_t b = (uint8_t)bits;
+        return (b & 0x80) ? -(float)(b & 0x7F) : (float)(b & 0x7F);
+    }
     case 30: /* UInt8 */
         return (float)(uint8_t)bits;
     default:
@@ -1504,8 +1507,13 @@ static uint32_t float_to_datum(float f, uint32_t fmt)
         return (uint32_t)(uint16_t)f;
     case 12: /* Int16 */
         return (uint32_t)(uint16_t)(int16_t)f;
-    case 14: /* Int8 */
-        return (uint32_t)(uint8_t)(int8_t)f;
+    case 14: /* Int8 sign-magnitude: bit7=sign, bits[6:0]=magnitude */
+    {
+        int sign = (f < 0.0f) ? 1 : 0;
+        int mag  = (int)(sign ? -f : f);
+        if (mag > 127) mag = 127;
+        return (uint32_t)((sign << 7) | mag);
+    }
     case 30: /* UInt8 */
         return (uint32_t)(uint8_t)f;
     default:
