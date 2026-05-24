@@ -612,6 +612,23 @@ void tensix_clear(tensix_t *tt)
     tt->flag_stack_top = -1;
     tt->neginf = -__builtin_inff();
 
+    /* Restore SFPU LReg hardware constants — these are hardwired on real
+     * hardware and survive kernel dispatches; tensix_clear must match that. */
+    {
+        float f_0_8373 = 0.8373f;
+        uint32_t fp_0_8373;
+        memcpy(&fp_0_8373, &f_0_8373, 4);
+        uint32_t fp_1_0     = 0x3F800000;
+        uint32_t fp_neg_1_0 = 0xBF800000;
+        for (int i = 0; i < LREG_LANES; i++) {
+            tt->lreg[8][i]  = fp_0_8373;
+            tt->lreg[9][i]  = 0;
+            tt->lreg[10][i] = fp_1_0;
+            tt->lreg[11][i] = fp_neg_1_0;
+            tt->lreg[15][i] = (uint32_t)(2 * i);
+        }
+    }
+
     /* Reset entire COP struct, preserving structural/callback fields */
     if (saved_cop) {
         tensix_t   *saved_core       = saved_cop->core;
@@ -659,186 +676,3 @@ void tensix_clear(tensix_t *tt)
 
 }
 
-/* ============================================================================
- * Debug: dump tensix state at kernel entry (called from emulate.c).
- * Remove this function and its call site when debugging is done.
- * ============================================================================ */
-void tensix_debug_dump_kernel_entry(tensix_t *tt)
-{
-    if (!tt || !tt->cop)
-        return;
-
-    tensix_cop_t *cop = tt->cop;
-    fprintf(stderr, "\n=== [TENSIX_STATE] kernel entry ===\n");
-
-    /* --- COP per-thread state --- */
-    for (int tid = 0; tid < 3; tid++) {
-        tensix_thread_cop_t *th = &cop->threads[tid];
-        tensix_fifo_t *fifo = &th->insn_fifo;
-        fprintf(stderr, "  T%d fifo=%u", tid, fifo->count);
-        if (fifo->count) {
-            fprintf(stderr, " [");
-            for (uint32_t i = 0; i < fifo->count; i++) {
-                uint32_t idx = (fifo->head + i) % TENSIX_FIFO_SIZE;
-                fprintf(stderr, "%s0x%08x", i ? "," : "", fifo->buffer[idx]);
-            }
-            fprintf(stderr, "]");
-        }
-        if (th->has_current_insn)
-            fprintf(stderr, " pending=0x%08x", th->current_insn);
-        if (th->wait_gate.active)
-            fprintf(stderr, " WAIT{op=0x%02x blk=0x%03x cond=0x%04x sem=0x%02x}",
-                    th->wait_gate.opcode, th->wait_gate.block_mask,
-                    th->wait_gate.condition_mask, th->wait_gate.semaphore_mask);
-        fprintf(stderr, "\n       mop_cfg=[");
-        for (int i = 0; i < 9; i++)
-            fprintf(stderr, "%s0x%08x", i ? "," : "", th->mop_cfg[i]);
-        fprintf(stderr, "] expand=%d zmask_hi=0x%x\n", th->mop_state.active, th->zmask_hi16);
-    }
-
-    /* --- Bank tracking --- */
-    fprintf(stderr, "  banks: unp_srca=%u unp_srcb=%u math_srca=%u math_srcb=%u"
-                    " last_unp_srca=%u mova2d_bank=%u(valid=%d)\n",
-            tt->unp_srca_bank, tt->unp_srcb_bank,
-            tt->math_srca_bank, tt->math_srcb_bank,
-            tt->last_unp_srca_bank,
-            tt->mova2d_latched_bank, tt->mova2d_bank_valid);
-
-    /* --- dvalid + dest_offset --- */
-    fprintf(stderr, "  dvalid: srca=[%d,%d] srcb=[%d,%d] srcb_zeroed=[%d,%d]"
-                    " dest=%d dest_offset=%u\n",
-            tt->srca_dvalid[0], tt->srca_dvalid[1],
-            tt->srcb_dvalid[0], tt->srcb_dvalid[1],
-            tt->srcb_zeroed[0], tt->srcb_zeroed[1],
-            tt->dest_dvalid, tt->dest_offset);
-
-    /* --- RWC counters + cfg_state_id + fidelity per thread --- */
-    for (int tid = 0; tid < 3; tid++) {
-        fprintf(stderr, "  T%d rwc: srca=%u srcb=%u dest=%u"
-                        " | cr: srca=%u srcb=%u dest=%u"
-                        " cfg_state_id=%u fidelity=%u\n",
-                tid,
-                tt->srca_rwc[tid], tt->srcb_rwc[tid], tt->dest_rwc[tid],
-                tt->srca_rwc_cr[tid], tt->srcb_rwc_cr[tid], tt->dest_rwc_cr[tid],
-                tt->cfg_state_id[tid], tt->fidelity[tid]);
-    }
-
-    /* --- thd_reg per thread (all, skip trailing zeros) --- */
-    for (int tid = 0; tid < 3; tid++) {
-        int last = -1;
-        for (int i = THD_REG_COUNT - 1; i >= 0; i--) {
-            if (tt->thd_reg[tid][i]) { last = i; break; }
-        }
-        if (last >= 0) {
-            fprintf(stderr, "  T%d thd_reg[0..%d]=[", tid, last);
-            for (int i = 0; i <= last; i++)
-                fprintf(stderr, "%s0x%x", i ? "," : "", tt->thd_reg[tid][i]);
-            fprintf(stderr, "]\n");
-        } else {
-            fprintf(stderr, "  T%d thd_reg=all_zero\n", tid);
-        }
-    }
-
-    /* --- ADC position counters per channel --- */
-    for (int tid = 0; tid < 3; tid++) {
-        AddrCtrl *a = &tt->adc[tid];
-        fprintf(stderr, "  T%d adc ch0=[x=%u y=%u z=%u w=%u]"
-                        " cr=[x=%u y=%u z=%u w=%u]"
-                        " ch1=[y=%u z=%u w=%u]\n",
-                tid,
-                a->ch0_x, a->ch0_y, a->ch0_z, a->ch0_w,
-                a->ch0_x_cr, a->ch0_y_cr, a->ch0_z_cr, a->ch0_w_cr,
-                a->ch1_y, a->ch1_z, a->ch1_w);
-    }
-
-    /* --- Semaphores + sem_math_pack + mutex --- */
-    fprintf(stderr, "  sem=[");
-    for (int i = 0; i < 8; i++)
-        fprintf(stderr, "%s%u", i ? "," : "", tt->sem[i]);
-    fprintf(stderr, "] sem_max=[");
-    for (int i = 0; i < 8; i++)
-        fprintf(stderr, "%s%u", i ? "," : "", tt->sem_max[i]);
-    fprintf(stderr, "] sem_math_pack=%u bias=%u\n", tt->sem_math_pack, tt->bias);
-
-    {
-        bool any = false;
-        for (int i = 0; i < 8; i++) if (tt->mutex[i]) { any = true; break; }
-        if (any) {
-            fprintf(stderr, "  mutex=[");
-            for (int i = 0; i < 8; i++)
-                fprintf(stderr, "%s%u", i ? "," : "", tt->mutex[i]);
-            fprintf(stderr, "]\n");
-        }
-    }
-
-    /* --- Pack state --- */
-    fprintf(stderr, "  pack: l1_write_offset=%u l1_dest_addr_raw=0x%x\n",
-            tt->pack_l1_write_offset, tt->pack_l1_dest_addr_raw);
-
-    /* --- Mailbox counts + stall --- */
-    {
-        bool any = false;
-        for (int s = 0; s < MAILBOX_CORES; s++)
-            for (int d = 0; d < MAILBOX_CORES; d++)
-                if (tt->mailbox_count[s][d]) { any = true; break; }
-        for (int i = 0; i < MAILBOX_CORES && !any; i++)
-            if (tt->mailbox_stall[i]) any = true;
-        if (any) {
-            for (int s = 0; s < MAILBOX_CORES; s++)
-                for (int d = 0; d < MAILBOX_CORES; d++)
-                    if (tt->mailbox_count[s][d])
-                        fprintf(stderr, "  mailbox[%d->%d] count=%d\n",
-                                s, d, tt->mailbox_count[s][d]);
-            fprintf(stderr, "  mailbox_stall=[%d,%d,%d,%d]\n",
-                    tt->mailbox_stall[0], tt->mailbox_stall[1],
-                    tt->mailbox_stall[2], tt->mailbox_stall[3]);
-        }
-    }
-
-    /* --- Replay state + first 8 buffer entries --- */
-    for (int tid = 0; tid < 3; tid++) {
-        fprintf(stderr, "  T%d replay: recording=%d expanding=%d"
-                        " count=%u cur=%u idx=%u left=%u",
-                tid,
-                tt->replay_recording[tid], tt->replay_expanding[tid],
-                tt->replay_expand_count[tid], tt->replay_expand_current[tid],
-                tt->replay_index[tid], tt->replay_left[tid]);
-        if (tt->replay_expand_count[tid]) {
-            uint32_t show = tt->replay_expand_count[tid] < 8
-                          ? tt->replay_expand_count[tid] : 8;
-            fprintf(stderr, " buf=[");
-            for (uint32_t i = 0; i < show; i++)
-                fprintf(stderr, "%s0x%08x", i ? "," : "", tt->replay_buffer[tid][i]);
-            if (tt->replay_expand_count[tid] > 8) fprintf(stderr, ",...");
-            fprintf(stderr, "]");
-        }
-        fprintf(stderr, "\n");
-    }
-
-    /* --- cfg_reg: print non-zero entries (bank 0 and bank 1) --- */
-    for (int bank = 0; bank < 2; bank++) {
-        bool hdr = false;
-        for (int i = 0; i < CFG_REG_COUNT; i++) {
-            if (tt->cfg_reg[bank][i]) {
-                if (!hdr) { fprintf(stderr, "  cfg_reg[bank%d]:", bank); hdr = true; }
-                fprintf(stderr, " [%d]=0x%x", i, tt->cfg_reg[bank][i]);
-            }
-        }
-        if (hdr) fprintf(stderr, "\n");
-    }
-
-    /* --- Binary snapshot: write entire tensix_t to file for external diff --- */
-    {
-        static int snap_count = 0;
-        char path[64];
-        snprintf(path, sizeof(path), "/tmp/tensix_snap_%d.bin", snap_count++);
-        FILE *f = fopen(path, "wb");
-        if (f) {
-            fwrite(tt, sizeof(*tt), 1, f);
-            fclose(f);
-            fprintf(stderr, "  [SNAP] wrote %s (%zu bytes)\n", path, sizeof(*tt));
-        }
-    }
-
-    fprintf(stderr, "=== [TENSIX_STATE end] ===\n\n");
-}

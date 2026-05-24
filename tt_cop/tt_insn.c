@@ -16,6 +16,12 @@
 
 
 
+static void ts(char *buf, size_t sz) {
+    struct timespec tp; clock_gettime(CLOCK_REALTIME, &tp);
+    struct tm *tm = localtime(&tp.tv_sec);
+    strftime(buf, sz, "%Y-%m-%d %H:%M:%S", tm);
+}
+
 /* Instruction implementation function pointer type.
  * Returns true if the instruction completed, false if blocked/incomplete.
  */
@@ -3776,8 +3782,32 @@ static bool sfpcompc(tensix_t *tt, uint32_t imm, int tid) {
     }
     return true;
 }
-static bool sfptransp(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
-    report_unimpl(__func__, imm, tid); return true;
+static bool sfptransp(tensix_t *tt, uint32_t imm, int tid) {
+    /* SFPTRANSP: transpose lreg[0..3] and lreg[4..7] as 4x4x8 tensors.
+     * Each group of 4 regs is viewed as a 4x4x8 tensor; the first two axes are swapped.
+     * Encoding: VD<<4; execute if VD < 12.
+     */
+    uint32_t vd = (imm >> 4) & 0xF;
+    if (vd >= 12) return true;
+
+    for (int base = 0; base <= 4; base += 4) {
+        for (int col = 0; col < 8; col++) {
+            for (int i = 0; i < 4; i++) {
+                for (int j = 0; j < i; j++) {
+                    int lane_ij = j * 8 + col;
+                    int lane_ji = i * 8 + col;
+                    uint32_t ij = tt->lreg[base + i][lane_ij];
+                    uint32_t ji = tt->lreg[base + j][lane_ji];
+                    if (!tt->use_lane_flags[lane_ij] || tt->lane_flags[lane_ij])
+                        tt->lreg[base + i][lane_ij] = ji;
+                    if (!tt->use_lane_flags[lane_ji] || tt->lane_flags[lane_ji])
+                        tt->lreg[base + j][lane_ji] = ij;
+                }
+            }
+        }
+    }
+
+    return true;
 }
 static bool sfpxor(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
     report_unimpl(__func__, imm, tid); return true;
@@ -3853,7 +3883,7 @@ static bool sfpstochrnd(tensix_t *tt, uint32_t imm, int tid) {
     return true;
 }
 static bool sfpnop(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
-    report_unimpl(__func__, imm, tid); return true;
+    return true;
 }
 static bool sfpcast(tensix_t *tt, uint32_t imm, int tid) {
     /* Encoding: VC<<8 | VD<<4 | Mod1

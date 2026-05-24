@@ -3,6 +3,7 @@
  */
 
 #include <string.h>
+#include <stdio.h>
 #include "tensix_cop.h"
 
 /* Wait instruction opcodes (per ckernel_ops.h) */

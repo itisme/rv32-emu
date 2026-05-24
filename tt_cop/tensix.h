@@ -513,7 +513,5 @@ bool tensix_mmio_read(tensix_t *tt, int core_id, uint32_t addr, uint32_t *result
 /* Clear per-kernel tensix state when all cores return to firmware. */
 void tensix_clear(tensix_t *tt);
 
-/* Debug: dump tensix state at kernel entry. Remove when debugging is done. */
-void tensix_debug_dump_kernel_entry(tensix_t *tt);
 
 #endif
