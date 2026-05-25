@@ -120,6 +120,7 @@ static bool sfpiadd(tensix_t *tt, uint32_t imm, int tid);
 static bool sfpshft(tensix_t *tt, uint32_t imm, int tid);
 static bool sfpsetcc(tensix_t *tt, uint32_t imm, int tid);
 static bool sfpmov(tensix_t *tt, uint32_t imm, int tid);
+static uint32_t advance_prng(tensix_t *tt, int lane);
 static bool sfpabs(tensix_t *tt, uint32_t imm, int tid);
 static bool sfpand(tensix_t *tt, uint32_t imm, int tid);
 static bool sfpor(tensix_t *tt, uint32_t imm, int tid);
@@ -3426,15 +3427,25 @@ static bool sfpmov(tensix_t *tt, uint32_t imm, int tid) {
 
     #define SFPMOV_MOD1_NEGATE            1
     #define SFPMOV_MOD1_ALL_LANES_ENABLED 2
+    #define SFPMOV_MOD1_FROM_SPECIAL      8
 
     for (int lane = 0; lane < LREG_LANES; lane++) {
         if (vd >= 12) continue;
         bool lane_enabled = !tt->use_lane_flags[lane] || tt->lane_flags[lane];
         if (!lane_enabled && mod1 != SFPMOV_MOD1_ALL_LANES_ENABLED) continue;
 
-        uint32_t x = tt->lreg[vc][lane];
-        if (mod1 & SFPMOV_MOD1_NEGATE) {
-            x ^= 0x80000000;
+        uint32_t x;
+        if (mod1 & SFPMOV_MOD1_FROM_SPECIAL) {
+            /* ISA: FROM_SPECIAL mode — VC selects config/PRNG source */
+            switch (vc) {
+            case 9:  x = advance_prng(tt, lane); break;
+            default: x = 0; break;
+            }
+        } else {
+            x = tt->lreg[vc][lane];
+            if (mod1 & SFPMOV_MOD1_NEGATE) {
+                x ^= 0x80000000;
+            }
         }
         if (vd < 8 || vd == 16) {
             tt->lreg[vd][lane] = x;

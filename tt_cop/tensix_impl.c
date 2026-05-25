@@ -114,9 +114,13 @@ void tensix_init(tensix_t *tt,
     tt->pack_l1_write_offset = 0;
     tt->pack_l1_dest_addr_raw = 0;
 
-    /* Initialize SFPU lane predication:
-     * UseLaneFlagsForLaneEnable = true, LaneFlags = true → all lanes enabled.
-     * This matches hardware reset state: LaneEnabled = !UseLaneFlags || LaneFlags = true.
+    /* Initialize SFPU lane predication to post-BRISC-init state.
+     * Hardware power-on reset: use_lane_flags=false, lane_flags=false.
+     * BRISC firmware calls ex_encc() once at startup (brisc.cc) which executes
+     * SFPENCC(EI|RI, imm2=3), setting both to true. All kernels run after that,
+     * so the effective initial state for kernel execution is true/true.
+     * If we ever simulate full BRISC boot sequence, change these back to false
+     * and let ex_encc() set them correctly.
      */
     tt->flag_stack_top = -1;  /* empty stack */
     for (int i = 0; i < LREG_LANES; i++) {
@@ -594,6 +598,15 @@ void tensix_clear(tensix_t *tt)
      * before each kernel; preserve it across clears. */
     uint32_t saved_sem_max[8];
     for (int i = 0; i < 8; i++) saved_sem_max[i] = tt->sem_max[i];
+    /* SFPU lane predication is hardware state that persists across kernel
+     * dispatches — firmware does not reset it between kernels.
+     * NOTE: tensix_init hard-codes these to true; if that ever changes
+     * (e.g. firmware sets use_lane_flags=false as its normal mode), revisit. */
+    bool saved_lane_flags[LREG_LANES], saved_use_lane_flags[LREG_LANES];
+    for (int i = 0; i < LREG_LANES; i++) {
+        saved_lane_flags[i]     = tt->lane_flags[i];
+        saved_use_lane_flags[i] = tt->use_lane_flags[i];
+    }
 
     /* Wipe all runtime state (mop_templ_0/1 contain only unused TemplateOp
      * function pointer fields — verified no .c code references them) */
@@ -610,6 +623,10 @@ void tensix_clear(tensix_t *tt)
     for (int i = 0; i < 8; i++)
         tt->mutex[i] = MUTEX_NONE;  /* 0xFF */
     tt->flag_stack_top = -1;
+    for (int i = 0; i < LREG_LANES; i++) {
+        tt->lane_flags[i]     = saved_lane_flags[i];
+        tt->use_lane_flags[i] = saved_use_lane_flags[i];
+    }
     tt->neginf = -__builtin_inff();
 
     /* Restore SFPU LReg hardware constants — these are hardwired on real
