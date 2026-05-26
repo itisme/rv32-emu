@@ -16,6 +16,9 @@
 
 
 
+/* Debug helper: format current wall-clock time into buf as "HH:MM:SS.mmm".
+ * Used by debug fprintf calls (e.g. in ttmop, ttelwmul).  Not called in
+ * normal execution — kept intentionally for future debugging sessions. */
 static void ts(char *buf, size_t sz) {
     struct timespec tp; clock_gettime(CLOCK_REALTIME, &tp);
     struct tm *tm = localtime(&tp.tv_sec);
@@ -463,10 +466,10 @@ static bool ttnop(tensix_t *tt, uint32_t imm, int tid) {
     return true;
 }
 
-/* Print mop_cfg for a thread when it has changed since last call.
+/* Debug helper: print mop_cfg for a thread when it has changed since last call.
  * Controlled by TT_MOP_CFG_PRINT env var (non-zero = enabled).
  * Call at the start of ttmop to observe active config before expansion.
- */
+ * Not called in normal execution — kept intentionally for future debugging sessions. */
 static void print_mop_cfg_if_changed(tensix_t *tt, int tid) {
     static int enabled = -1;
     if (enabled < 0) {
@@ -518,7 +521,6 @@ static bool ttmop_cfg(tensix_t *tt, uint32_t imm, int tid) {
 static bool ttmop(tensix_t *tt, uint32_t imm, int tid) {
     if (!tt->cop) return true;
 
-    /* print_mop_cfg_if_changed(tt, tid); */
     int thread_id = tid;
     TT_DBG("[MOP] Expanding MOP, param=0x%06x, thread=%d\n", imm, thread_id);
     tensix_cop_mop_expand(tt->cop, thread_id, imm);
@@ -3147,16 +3149,15 @@ static bool sfpstore(tensix_t *tt, uint32_t imm, int tid) {
     uint32_t sfpu_addr_mode = (imm >> 13) & 0x7;
     uint32_t dest_reg_addr  = imm & 0x1FFF;
 
-    (void)instr_mod0; /* TODO: data format conversion */
+    /* ISA: LaneEnabled = !UseLaneFlagsForLaneEnable || LaneFlags
+     *       write iff (LaneEnabled || instr_mod0 == MOD0_FMT_INT32_ALL(10)) */
 
-    /* ISA (SFPSTORE.md) address calculation — same as SFPLOAD:
-     *   Addr = Imm + ThreadConfig.DEST_TARGET_REG_CFG_MATH_Offset
-     *        + RWCs.Dst + ConfigState.DEST_REGW_BASE_Base
-     */
     uint32_t math_offset = tt->thd_reg[tid][1];
     uint32_t addr = dest_reg_addr + math_offset + tt->dest_rwc[tid];
     uint32_t odd_col = (addr & 2) ? 1 : 0;
     for (int lane = 0; lane < LREG_LANES; lane++) {
+        if (tt->use_lane_flags[lane] && !tt->lane_flags[lane] && instr_mod0 != 10)
+            continue;
         uint32_t row = (addr & ~3) + (lane / 8);
         uint32_t col = (lane & 7) * 2 + odd_col;
         if (row < DEST_ROWS && col < ROW_SIZE) {
@@ -3453,8 +3454,33 @@ static bool sfpmov(tensix_t *tt, uint32_t imm, int tid) {
     }
     return true;
 }
-static bool sfpabs(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
-    report_unimpl(__func__, imm, tid); return true;
+static bool sfpabs(tensix_t *tt, uint32_t imm, int tid) {
+    /* Encoding: imm12<<12 | VC<<8 | VD<<4 | Mod1
+     * Mod1 & 1 (SFPABS_MOD1_FLOAT): FP32 abs — clear sign bit, -NaN left as-is
+     * else: two's complement integer negate
+     */
+    (void)tid;
+    uint32_t vc   = (imm >> 8) & 0xF;
+    uint32_t vd   = (imm >> 4) & 0xF;
+    uint32_t mod1 = imm & 0xF;
+
+    if (vd >= 8 && vd != 16) return true;
+
+    for (int lane = 0; lane < LREG_LANES; lane++) {
+        if (tt->use_lane_flags[lane] && !tt->lane_flags[lane]) continue;
+        uint32_t x = tt->lreg[vc][lane];
+        if (x >= 0x80000000u) {
+            if (mod1 & 1) {
+                /* FP32: -NaN (x > 0xff800000) left as-is; everything else clear sign */
+                if (x <= 0xff800000u)
+                    x &= 0x7fffffffu;
+            } else {
+                x = (uint32_t)(-(int32_t)x);
+            }
+        }
+        tt->lreg[vd][lane] = x;
+    }
+    return true;
 }
 static bool sfpand(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
     report_unimpl(__func__, imm, tid); return true;
@@ -4011,8 +4037,93 @@ static bool sfploadmacro(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)
 static bool sfpshft2(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
     report_unimpl(__func__, imm, tid); return true;
 }
-static bool sfplutfp32(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
-    report_unimpl(__func__, imm, tid); return true;
+/* Convert 16-bit LUT entry to FP32.
+ * Unlike IEEE754 FP16: Exp==0x1f → 0 (not Inf/NaN); subnormals treated as normals.
+ */
+static float lut16_to_fp32(uint16_t x) {
+    uint32_t sign = (uint32_t)(x >> 15);
+    uint32_t exp  = (x >> 10) & 0x1fu;
+    uint32_t man  = x & 0x3ffu;
+    uint32_t bits = (sign << 31) | ((exp == 0x1fu ? 0u : 112u + exp) << 23) | (man << 13);
+    float f;
+    memcpy(&f, &bits, 4);
+    return f;
+}
+
+static bool sfplutfp32(tensix_t *tt, uint32_t imm, int tid) {
+    /* Encoding: VD<<4 | Mod1
+     * Piecewise linear FP32 function using LReg[0..6] as table coefficients.
+     * Input: LReg[3] (abs taken). Output: a*b+c, optionally sign-retained.
+     * Mod1 bits:
+     *   0x02 (FP16_6ENTRY_TABLE1): use Lut16ToFp32, split at 0.5/1/1.5/2/3
+     *   0x03 (FP16_6ENTRY_TABLE2): same but final split at 4 instead of 3
+     *   0x0A (FP16_3ENTRY_TABLE):  Lut16ToFp32 upper/lower halves, 3 entries, writes LReg[LReg[7]&15]
+     *   0x00 (FP32_3ENTRY_TABLE):  LReg[i].f32 directly, 3 entries
+     *   0x04 (SGN_RETAIN): copy sign of LReg[3] to result
+     *   0x08 (INDIRECT_VD): write to LReg[LReg[7]&15]
+     */
+    (void)tid;
+    uint32_t vd   = (imm >> 4) & 0xF;
+    uint32_t mod1 = imm & 0xF;
+
+    #define SFPLUTFP32_MOD1_FP16_3ENTRY_TABLE  10u
+    #define SFPLUTFP32_MOD1_FP16_6ENTRY_TABLE1  2u
+    #define SFPLUTFP32_MOD1_FP16_6ENTRY_TABLE2  3u
+    #define SFPLUTFP32_MOD1_SGN_RETAIN           4u
+    #define SFPLUTFP32_MOD1_INDIRECT_VD          8u
+
+    for (int lane = 0; lane < LREG_LANES; lane++) {
+        /* VD >= 12 with backdoor disabled: skip (simplified: treat as always disabled) */
+        if (vd >= 12) continue;
+        if (tt->use_lane_flags[lane] && !tt->lane_flags[lane]) continue;
+
+        uint32_t l3_bits = tt->lreg[3][lane];
+        float l3;
+        memcpy(&l3, &l3_bits, 4);
+        float b = fabsf(l3);
+
+        /* Select 3-entry index based on abs(LReg[3]) */
+        uint32_t i = b < 1.0f ? 0u : b < 2.0f ? 1u : 2u;
+
+        float a, c;
+        if (mod1 & SFPLUTFP32_MOD1_FP16_6ENTRY_TABLE1) {
+            if ((mod1 & SFPLUTFP32_MOD1_FP16_3ENTRY_TABLE) == SFPLUTFP32_MOD1_FP16_3ENTRY_TABLE) {
+                /* FP16_3ENTRY: upper/lower 16 bits of LReg[i] and LReg[i] itself */
+                a = lut16_to_fp32((uint16_t)((tt->lreg[0 + i][lane] >> 16) & 0xffffu));
+                c = lut16_to_fp32((uint16_t)( tt->lreg[0 + i][lane]        & 0xffffu));
+            } else {
+                /* FP16_6ENTRY: split each entry into upper/lower half */
+                float cut = ((mod1 & SFPLUTFP32_MOD1_FP16_6ENTRY_TABLE2) == SFPLUTFP32_MOD1_FP16_6ENTRY_TABLE2)
+                            ? 4.0f : 3.0f;
+                uint32_t j = b < 0.5f ?  0u
+                           : b < 1.0f ? 16u
+                           : b < 1.5f ?  0u
+                           : b < 2.0f ? 16u
+                           : b < cut  ?  0u
+                           :            16u;
+                a = lut16_to_fp32((uint16_t)((tt->lreg[0 + i][lane] >> j) & 0xffffu));
+                c = lut16_to_fp32((uint16_t)((tt->lreg[4 + i][lane] >> j) & 0xffffu));
+            }
+        } else {
+            /* FP32_3ENTRY: use LReg[i].f32 directly */
+            memcpy(&a, &tt->lreg[0 + i][lane], 4);
+            memcpy(&c, &tt->lreg[4 + i][lane], 4);
+        }
+
+        float d = a * b + c;
+        if (mod1 & SFPLUTFP32_MOD1_SGN_RETAIN)
+            d = copysignf(d, l3);
+
+        unsigned dst;
+        if ((mod1 & SFPLUTFP32_MOD1_INDIRECT_VD) && vd != 16)
+            dst = tt->lreg[7][lane] & 15u;
+        else
+            dst = vd;
+
+        if (dst < 8 || dst == 16)
+            memcpy(&tt->lreg[dst][lane], &d, 4);
+    }
+    return true;
 }
 static bool sfple(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
     report_unimpl(__func__, imm, tid); return true;
@@ -4023,8 +4134,121 @@ static bool sfpgt(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (v
 static bool sfpmul24(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
     report_unimpl(__func__, imm, tid); return true;
 }
-static bool sfparecip(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
-    report_unimpl(__func__, imm, tid); return true;
+static uint32_t sfparecip_approx_recip(uint32_t x) {
+    static const uint8_t LUT[128] = {
+        127, 125, 123, 121, 119, 117, 116, 114, 112, 110, 109, 107, 105, 104, 102, 100, 99,
+        97, 96, 94, 93, 91, 90, 88, 87, 85, 84, 83, 81, 80, 79, 77, 76, 75, 74, 72, 71, 70,
+        69, 68, 66, 65, 64, 63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48,
+        47, 46, 45, 44, 43, 42, 41, 40, 40, 39, 38, 37, 36, 35, 35, 34, 33, 32, 31, 31, 30,
+        29, 28, 28, 27, 26, 25, 25, 24, 23, 23, 22, 21, 21, 20, 19, 19, 18, 17, 17, 16, 15,
+        15, 14, 14, 13, 12, 12, 11, 11, 10, 9, 9, 8, 8, 7, 7, 6, 5, 5, 4, 4, 3, 3, 2, 2, 1,
+        1, 0
+    };
+    if (x < 0x00800000u)
+        return 0x7f800000u; /* x < 2^-126 → Inf */
+    else if (x < 0x7e800000u)
+        return ((253u - (x >> 23)) << 23) | ((uint32_t)LUT[(x >> 16) & 0x7fu] << 16);
+    else
+        return 0u;
+}
+
+static uint32_t sfparecip_approx_exp(uint32_t x) {
+    static const uint8_t LUT[896] = {
+        2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+        2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+        2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+        3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+        3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+        4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+        5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 6,
+        6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7,
+        7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 8, 8, 8,
+        8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9,
+        9, 9, 9, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 11, 11, 11, 11,
+        11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12,
+        12, 12, 12, 12, 12, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 14, 14,
+        14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+        15, 15, 15, 15, 15, 15, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 17,
+        17, 17, 17, 17, 17, 17, 18, 18, 18, 18, 18, 18, 18, 19, 19, 19, 19, 19, 19, 19, 20,
+        20, 20, 20, 20, 20, 20, 21, 21, 21, 21, 21, 21, 21, 22, 22, 22, 22, 22, 22, 22, 23,
+        23, 23, 23, 23, 23, 24, 24, 24, 24, 24, 24, 24, 25, 25, 25, 25, 25, 25, 25, 26, 26,
+        26, 26, 26, 26, 27, 27, 27, 27, 27, 27, 27, 28, 28, 28, 28, 28, 28, 28, 29, 29, 29,
+        29, 29, 29, 30, 30, 30, 30, 30, 30, 30, 31, 31, 31, 31, 31, 31, 32, 32, 32, 32, 32,
+        32, 33, 33, 33, 33, 33, 33, 33, 34, 34, 34, 34, 34, 34, 35, 35, 35, 35, 35, 35, 36,
+        36, 36, 36, 36, 37, 37, 37, 38, 38, 38, 39, 39, 39, 40, 40, 40, 41, 41, 41, 42, 42,
+        42, 43, 43, 43, 44, 44, 44, 45, 45, 45, 46, 46, 46, 47, 47, 47, 48, 48, 49, 49, 49,
+        50, 50, 50, 51, 51, 51, 52, 52, 52, 53, 53, 53, 54, 54, 54, 55, 55, 56, 56, 56, 57,
+        57, 57, 58, 58, 58, 59, 59, 60, 60, 60, 61, 61, 61, 62, 62, 63, 63, 63, 64, 64, 64,
+        65, 65, 66, 66, 66, 67, 67, 67, 68, 68, 69, 69, 69, 70, 70, 71, 71, 71, 72, 72, 72,
+        73, 73, 74, 74, 74, 75, 75, 76, 76, 76, 77, 77, 78, 78, 78, 79, 79, 80, 80, 80, 81,
+        81, 82, 82, 83, 83, 84, 85, 86, 87, 88, 88, 89, 90, 91, 92, 93, 94, 94, 95, 96, 97,
+        98, 99, 100, 101, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113,
+        113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127,
+        0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12,
+        13, 13, 14, 15, 15, 16, 16, 17, 17, 18, 19, 19, 20, 20, 21, 21, 22, 23, 23, 24, 24,
+        25, 26, 26, 27, 27, 28, 29, 29, 30, 31, 31, 32, 32, 33, 34, 34, 35, 36, 36, 37, 38,
+        38, 39, 39, 40, 41, 41, 42, 43, 43, 44, 45, 45, 47, 48, 50, 51, 52, 54, 55, 57, 58,
+        60, 61, 63, 64, 66, 67, 69, 70, 72, 73, 75, 76, 78, 80, 81, 83, 85, 86, 88, 90, 91,
+        93, 95, 97, 98, 100, 102, 104, 106, 107, 109, 111, 113, 115, 117, 119, 121, 123,
+        125, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 139, 140, 141, 142,
+        143, 144, 145, 146, 147, 149, 150, 151, 152, 153, 155, 156, 157, 158, 159, 161,
+        162, 163, 165, 166, 167, 168, 170, 171, 172, 174, 175, 177, 178, 179, 181, 182,
+        184, 185, 187, 188, 189, 191, 192, 194, 196, 197, 199, 200, 202, 203, 205, 207,
+        208, 210, 211, 213, 215, 216, 218, 220, 222, 223, 225, 227, 229, 230, 232, 234
+    };
+    if (x < 0x00800000u)
+        return 0x3f800000u; /* x < 2^-126 → 1.0 */
+    else if (x < 0x3c800000u)
+        return 0x3f810000u | (uint16_t)x;
+    else if (x < 0x3f320000u)
+        return 0x3f800000u | ((uint32_t)LUT[(x >> 16) - 0x3c80u] << 16) | (uint16_t)x;
+    else if (x < 0x40000000u)
+        return 0x40000000u | ((uint32_t)LUT[(x >> 16) - 0x3c80u] << 16) | (uint16_t)x;
+    else
+        return 0x40800000u | (uint16_t)x;
+}
+
+static bool sfparecip(tensix_t *tt, uint32_t imm, int tid) {
+    /* Encoding: imm12<<12 | VB<<8 | VC<<8... actually:
+     *   bits[19:16] = VB, bits[11:8] = VC, bits[7:4] = VD, bits[3:0] = Mod1
+     * (VB passed as low nibble of imm12_math field, placed at bits[15:12] via <<12 shift,
+     *  but ISA diagram places VB at [19:16]; see ckernel_ops TT_OP_SFPARECIP encoding)
+     * Mod1: 0=RECIP, 1=COND_RECIP, 2=EXP
+     */
+    (void)tid;
+    uint32_t vb   = (imm >> 16) & 0xF;
+    uint32_t vc   = (imm >> 8)  & 0xF;
+    uint32_t vd   = (imm >> 4)  & 0xF;
+    uint32_t mod1 = imm & 0xF;
+
+    #define SFPARECIP_MOD1_RECIP      0u
+    #define SFPARECIP_MOD1_COND_RECIP 1u
+    #define SFPARECIP_MOD1_EXP        2u
+
+    if (vd >= 8 && vd != 16) return true;
+
+    for (int lane = 0; lane < LREG_LANES; lane++) {
+        if (tt->use_lane_flags[lane] && !tt->lane_flags[lane]) continue;
+        uint32_t x    = tt->lreg[vc][lane];
+        uint32_t sign = x & 0x80000000u;
+        uint32_t result;
+        switch (mod1) {
+        case SFPARECIP_MOD1_RECIP:
+            result = sign + sfparecip_approx_recip(x - sign);
+            break;
+        case SFPARECIP_MOD1_COND_RECIP:
+            if ((int32_t)tt->lreg[vb][lane] < 0)
+                result = sfparecip_approx_recip(x - sign);
+            else
+                result = x;
+            break;
+        default: /* SFPARECIP_MOD1_EXP */
+            result = sign + sfparecip_approx_exp(x - sign);
+            break;
+        }
+        tt->lreg[vd][lane] = result;
+    }
+    return true;
 }
 static bool ttatgetm(tensix_t *tt, uint32_t imm, int tid) {
     uint32_t mutex_id = imm & 0x7;

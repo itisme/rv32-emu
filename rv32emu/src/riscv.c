@@ -227,6 +227,7 @@ IO_HANDLER_IMPL(word, write_w, W)
 #endif
 
 #if RV32_HAS(EXT_TT)
+/* Track half-word writes by TRISC0 to L1 local area (catches tiles_acked updates) */
 static void on_mem_write_s(riscv_t *rv, riscv_word_t addr, riscv_half_t data)
 {
     memory_write_s(PRIV(rv)->mem, addr, (uint8_t *) &data);

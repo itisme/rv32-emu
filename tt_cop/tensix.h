@@ -449,6 +449,11 @@ struct tensix {
      * Bits: BRISC(-1)=bit3, T0=bit0, T1=bit1, T2=bit2.
      * tensix_clear() is called when the last core exits kernel space. */
     uint8_t cores_in_kernel;
+    /* True if any TRISC (T0/T1/T2, core_id 0-2) has entered kernel space in
+     * the current dispatch cycle. Dispatch-only tiles (cq_prefetch/cq_dispatch)
+     * run persistent BRISC-only kernels so this never gets set; tensix_clear is
+     * suppressed for them to avoid corrupting relay CB semaphore state. */
+    bool had_trisc_in_kernel;
 
 
 };

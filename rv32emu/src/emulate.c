@@ -488,7 +488,27 @@ static bool do_lw_mailbox(riscv_t *rv, const rv_insn_t *ir,
     return true;
 }
 
-/* Per-core cleanup on kernel → firmware transition; shared tensix_clear runs after all cores exit. */
+/* Clear the kernel-owned portion of this core's mem_local on kernel exit.
+ *
+ * Each Blackhole core type has a firmware-defined boundary (__fw_export_ldm_end)
+ * below which firmware-managed data lives and must survive across kernel dispatches.
+ * Above that boundary is kernel-private data that may be stale after a kernel
+ * returns; zero it so the next kernel starts clean.
+ *
+ * The boundary is computed at runtime from the global pointer register (gp = rv->X[3]),
+ * which is set by firmware _start and preserved by every kernel.
+ * fw_export_ldm_end = gp + gp_offset, where gp_offset is a per-core-type
+ * Blackhole hardware constant derived from the firmware linker script:
+ *
+ *   BRISC  (core_id < 0): gp + 1328   (fw exports 0xffb00d20 with gp=0xffb007f0)
+ *   TRISC0 (core_id = 0): gp + 48     (fw exports 0xffb00820)
+ *   TRISC1 (core_id = 1): gp - 2000   (fw exports 0xffb00020)
+ *   TRISC2 (core_id = 2): gp + 48     (fw exports 0xffb00820)
+ *   NCRISC (core_id = 3): skipped — has dedicated rta_l1_base clear
+ */
+/* Wrapper called when a core transitions kernel → firmware.
+ * Per-core cleanup (block cache) runs immediately.
+ * Shared state (tensix_clear) waits until all cores are done. */
 static void kernel_exit_core_cleanup(riscv_t *rv)
 {
     block_map_clear(rv);
@@ -1250,13 +1270,19 @@ void rv_step(void *arg)
                 rv->PC    >= TENSIX_KERNEL_ADDR_THRESHOLD) {
                 /* firmware → kernel */
                 rv->tensix->cores_in_kernel |= core_bit;
+                if (rv->core_id >= 0 && rv->core_id <= 2)
+                    rv->tensix->had_trisc_in_kernel = true;
             } else if (rv->pre_pc >= TENSIX_KERNEL_ADDR_THRESHOLD &&
                        rv->PC    <  TENSIX_KERNEL_ADDR_THRESHOLD) {
                 /* kernel → firmware: per-core cleanup, then clear bit */
                 kernel_exit_core_cleanup(rv);
                 rv->tensix->cores_in_kernel &= ~core_bit;
-                /* all cores back in firmware → safe to reset shared kernel state */
-                if (rv->tensix->cores_in_kernel == 0)
+                /* all cores back in firmware → safe to reset shared kernel state.
+                 * Skip for dispatch-only tiles (cq_prefetch/cq_dispatch): they run
+                 * persistent BRISC-only kernels and never set had_trisc_in_kernel;
+                 * wiping their state corrupts relay CB semaphores. */
+                if (rv->tensix->cores_in_kernel == 0 &&
+                    rv->tensix->had_trisc_in_kernel)
                     tensix_clear(rv->tensix);
             }
         } else if (rv->core_id == 3) {
