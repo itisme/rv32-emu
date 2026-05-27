@@ -1356,6 +1356,10 @@ static bool ttgapool(tensix_t *tt, uint32_t imm, int tid) {
      * Writes 1 Dst row per call (firmware uses setrwc +16 between calls to step across faces).
      * SrcA: 16×16 (rows srca_row..srca_row+15, 8-aligned)
      * SrcB: row srcb_row (8-aligned), 16 elements used as the left vector in the dot product
+     *
+     * Fidelity phases: HiFi4 calls GAPOOL 4× per group, each phase using different
+     * mantissa bits from SrcA/SrcB. The emulator uses full float32, so phase 0 already
+     * gives the exact result. Skip computation for phases > 0 to avoid 4× scaling.
      */
     if (!tt->srca_dvalid[tt->math_srca_bank]) return false;
 
@@ -1366,23 +1370,25 @@ static bool ttgapool(tensix_t *tt, uint32_t imm, int tid) {
     bool flip_srca = clear_dvalid & 0x1;
     bool flip_srcb = (clear_dvalid >> 1) & 0x1;
 
-    uint8_t ma_bank = tt->math_srca_bank;
-    uint8_t mb_bank = tt->math_srcb_bank;
+    if (tt->fidelity[tid] == 0) {
+        uint8_t ma_bank = tt->math_srca_bank;
+        uint8_t mb_bank = tt->math_srcb_bank;
 
-    uint32_t srca_row    = tt->srca_rwc[tid] & 0x38;          /* 8-row aligned */
-    uint32_t srcb_row    = tt->srcb_rwc[tid] & 0x38;          /* 8-row aligned */
-    uint32_t math_offset = tt->thd_reg[tid][1];
-    uint32_t dest_base   = (dst_row + math_offset + tt->dest_rwc[tid]) & 0x3FF;
+        uint32_t srca_row    = tt->srca_rwc[tid] & 0x38;          /* 8-row aligned */
+        uint32_t srcb_row    = tt->srcb_rwc[tid] & 0x38;          /* 8-row aligned */
+        uint32_t math_offset = tt->thd_reg[tid][1];
+        uint32_t dest_base   = (dst_row + math_offset + tt->dest_rwc[tid]) & 0x3FF;
 
-    if (dest_base < DEST_ROWS) {
-        for (unsigned j = 0; j < ROW_SIZE; j++) {
-            float sum = 0.0f;
-            for (unsigned k = 0; k < ROW_SIZE; k++) {
-                float a = (srca_row + k < SRCA_ROWS) ? tt->srca[ma_bank][srca_row + k][j] : 0.0f;
-                float b = (srcb_row     < SRCB_ROWS) ? tt->srcb[mb_bank][srcb_row][k]     : 0.0f;
-                sum += b * a;
+        if (dest_base < DEST_ROWS) {
+            for (unsigned j = 0; j < ROW_SIZE; j++) {
+                float sum = 0.0f;
+                for (unsigned k = 0; k < ROW_SIZE; k++) {
+                    float a = (srca_row + k < SRCA_ROWS) ? tt->srca[ma_bank][srca_row + k][j] : 0.0f;
+                    float b = (srcb_row     < SRCB_ROWS) ? tt->srcb[mb_bank][srcb_row][k]     : 0.0f;
+                    sum += b * a;
+                }
+                tt->dest[dest_base][j] += sum;
             }
-            tt->dest[dest_base][j] += sum;
         }
     }
 
@@ -1398,8 +1404,14 @@ static bool ttgapool(tensix_t *tt, uint32_t imm, int tid) {
     apply_addr_mod(tt, addr_mode & 0x7, tid);
     return true;
 }
-static bool ttgatesrcrst(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
-    report_unimpl(__func__, imm, tid); return true;
+static bool ttgatesrcrst(tensix_t *tt, uint32_t imm, int tid) {
+    /* GATESRCRST: reset SrcA/SrcB pipeline gate between Src registers and FPU.
+     * bit0=reset_srca_gate_control, bit1=reset_srcb_gate_control.
+     * Hardware: invalidates the one-slot pipeline buffer between Src and FPU.
+     * Emulator: no pipeline buffer exists; pure no-op.
+     */
+    (void)tt; (void)imm; (void)tid;
+    return true;
 }
 static bool ttcleardvalid(tensix_t *tt, uint32_t imm, int tid) {
     /* ckernel_ops.h: TT_OP_CLEARDVALID(cleardvalid, reset)
