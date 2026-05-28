@@ -395,6 +395,37 @@ bool tensix_mmio_read(tensix_t *tt, int core_id, uint32_t addr, uint32_t *result
         return false;
     }
 
+    /* WALL_CLOCK_L/H (0xFFB121F0/F8): firmware wait(N) busy-loops reading these.
+     * In the emulator MMIO writes are instantaneous — no real wait is needed.
+     * Return UINT32_MAX: timestamp=UINT64_MAX, timestamp+cycles overflows to ~0,
+     * wall_clock >= overflow_value is immediately true, do-while exits at once. */
+    if (addr == 0xFFB121F0 || addr == 0xFFB121F8) {
+        *result = 0xFFFFFFFF;
+        return true;
+    }
+
+    /* DBG_ARRAY_RD_DATA (0xFFB1206C): return DEST data based on last DBG_ARRAY_RD_CMD write.
+     * array_id 2=DEST; cmd bits [11:0]=row_addr, [15:12]=row_32b_sel, [18:16]=array_id.
+     * Each read returns two adjacent 16-bit DEST slots packed into one 32-bit word.
+     */
+    if (addr == 0xFFB1206C) {
+        uint32_t cmd         = tt->dbg_array_rd_cmd;
+        uint32_t row_addr    = cmd & 0xFFF;
+        uint32_t row_32b_sel = (cmd >> 12) & 0xF;
+        uint32_t array_id    = (cmd >> 16) & 0x7;
+        if (array_id == 2 && row_addr < DEST_ROWS) { /* 2 = DEST */
+            uint32_t col0 = row_32b_sel * 2;
+            uint32_t col1 = col0 + 1;
+            uint32_t v0 = 0, v1 = 0;
+            if (col0 < ROW_SIZE) memcpy(&v0, &tt->dest[row_addr][col0], 4);
+            if (col1 < ROW_SIZE) memcpy(&v1, &tt->dest[row_addr][col1], 4);
+            *result = (v0 & 0xFFFF) | ((v1 & 0xFFFF) << 16);
+        } else {
+            *result = 0;
+        }
+        return true;
+    }
+
     return false;  /* Not a special address, do normal memory read */
 }
 
@@ -575,6 +606,16 @@ bool tensix_mmio_write(tensix_t *tt, int core_id, uint32_t addr, uint32_t data)
                 tt->prng_state[lane] = data + lane;
         }
         return false; /* normal memory write to high_mem */
+    }
+
+    /* DBG_ARRAY_RD_CMD (0xFFB12064): save for later DBG_ARRAY_RD_DATA read */
+    if (addr == 0xFFB12064) {
+        tt->dbg_array_rd_cmd = data;
+        return true;
+    }
+    /* DBG_ARRAY_RD_EN (0xFFB12060): no-op, consume silently */
+    if (addr == 0xFFB12060) {
+        return true;
     }
 
     return false;

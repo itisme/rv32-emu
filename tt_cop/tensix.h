@@ -455,6 +455,10 @@ struct tensix {
      * suppressed for them to avoid corrupting relay CB semaphore state. */
     bool had_trisc_in_kernel;
 
+    /* RISCV debug array read: RISCV_DEBUG_REG_DBG_ARRAY_RD_{EN,CMD,DATA} at 0xFFB12060/64/6C
+     * cmd bits: [11:0]=row_addr, [15:12]=row_32b_sel, [18:16]=array_id, [19]=bank_id
+     * array_id: 0=SRCA, 1=SRCB, 2=DEST */
+    uint32_t dbg_array_rd_cmd;
 
 };
 

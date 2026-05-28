@@ -3494,11 +3494,41 @@ static bool sfpabs(tensix_t *tt, uint32_t imm, int tid) {
     }
     return true;
 }
-static bool sfpand(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
-    report_unimpl(__func__, imm, tid); return true;
+static bool sfpand(tensix_t *tt, uint32_t imm, int tid) {
+    /* Encoding: VB<<12 | VC<<8 | VD<<4 | Mod1
+     * vb = (Mod1 & SFPAND_MOD1_USE_VB=1) ? VB : VD
+     * LReg[VD] = LReg[vb] & LReg[VC]
+     */
+    (void)tid;
+    uint32_t vb   = (imm >> 12) & 0xF;
+    uint32_t vc   = (imm >> 8)  & 0xF;
+    uint32_t vd   = (imm >> 4)  & 0xF;
+    uint32_t mod1 = imm & 0xF;
+    if (vd >= 8 && vd != 16) return true;
+    uint32_t src = (mod1 & 1) ? vb : vd;
+    for (int lane = 0; lane < LREG_LANES; lane++) {
+        if (tt->use_lane_flags[lane] && !tt->lane_flags[lane]) continue;
+        tt->lreg[vd][lane] = tt->lreg[src][lane] & tt->lreg[vc][lane];
+    }
+    return true;
 }
-static bool sfpor(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
-    report_unimpl(__func__, imm, tid); return true;
+static bool sfpor(tensix_t *tt, uint32_t imm, int tid) {
+    /* Encoding: VB<<12 | VC<<8 | VD<<4 | Mod1
+     * vb = (Mod1 & SFPOR_MOD1_USE_VB=1) ? VB : VD
+     * LReg[VD] = LReg[vb] | LReg[VC]
+     */
+    (void)tid;
+    uint32_t vb   = (imm >> 12) & 0xF;
+    uint32_t vc   = (imm >> 8)  & 0xF;
+    uint32_t vd   = (imm >> 4)  & 0xF;
+    uint32_t mod1 = imm & 0xF;
+    if (vd >= 8 && vd != 16) return true;
+    uint32_t src = (mod1 & 1) ? vb : vd;
+    for (int lane = 0; lane < LREG_LANES; lane++) {
+        if (tt->use_lane_flags[lane] && !tt->lane_flags[lane]) continue;
+        tt->lreg[vd][lane] = tt->lreg[src][lane] | tt->lreg[vc][lane];
+    }
+    return true;
 }
 static bool sfpnot(tensix_t *tt, uint32_t imm, int tid) {
     /* Encoding: Imm12<<12 | VC<<8 | VD<<4 | Mod1
@@ -3858,8 +3888,19 @@ static bool sfptransp(tensix_t *tt, uint32_t imm, int tid) {
 
     return true;
 }
-static bool sfpxor(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
-    report_unimpl(__func__, imm, tid); return true;
+static bool sfpxor(tensix_t *tt, uint32_t imm, int tid) {
+    /* Encoding: 0<<12 | VC<<8 | VD<<4 | 0
+     * VB = VD (implicit), LReg[VD] = LReg[VD] ^ LReg[VC]
+     */
+    (void)tid;
+    uint32_t vc = (imm >> 8) & 0xF;
+    uint32_t vd = (imm >> 4) & 0xF;
+    if (vd >= 8 && vd != 16) return true;
+    for (int lane = 0; lane < LREG_LANES; lane++) {
+        if (tt->use_lane_flags[lane] && !tt->lane_flags[lane]) continue;
+        tt->lreg[vd][lane] ^= tt->lreg[vc][lane];
+    }
+    return true;
 }
 /* SFPU PRNG (VectorUnit.md): LFSR with taps at bits 31,21,1,0 */
 static uint32_t advance_prng(tensix_t *tt, int lane) {
