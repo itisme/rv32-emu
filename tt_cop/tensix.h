@@ -332,7 +332,7 @@ struct tensix {
     float srcb[2][SRCB_ROWS][ROW_SIZE];
     volatile bool srca_dvalid[2];   /* per-bank: true=MatrixUnit owns, false=Unpacker owns */
     volatile bool srcb_dvalid[2];
-    bool srcb_zeroed[2];   /* true if bank was zeroed by ZEROSRC and not yet written by real UNPACR */
+    volatile bool srcb_zeroed[2];   /* true if bank was zeroed by ZEROSRC and not yet written by real UNPACR */
 
     /* SFPU PRNG state (32 lanes, per VectorUnit.md) */
     uint32_t prng_state[LREG_LANES];
@@ -438,22 +438,22 @@ struct tensix {
 #define MAILBOX_CORES 4
 #define MAILBOX_FIFO_DEPTH 4
     uint32_t mailbox_fifo[MAILBOX_CORES][MAILBOX_CORES][MAILBOX_FIFO_DEPTH];
-    int mailbox_head[MAILBOX_CORES][MAILBOX_CORES];
-    int mailbox_count[MAILBOX_CORES][MAILBOX_CORES];
+    volatile int mailbox_head[MAILBOX_CORES][MAILBOX_CORES];
+    volatile int mailbox_count[MAILBOX_CORES][MAILBOX_CORES];
 
     /* Stall flags: indexed by mailbox core index (0=B, 1=T0, 2=T1, 3=T2).
      * The coroutine loop should rewind PC and yield when set. */
-    bool mailbox_stall[MAILBOX_CORES];  /* mailbox empty-pop or full-push */
+    volatile bool mailbox_stall[MAILBOX_CORES];  /* mailbox empty-pop or full-push */
 
     /* Bitmask of cores currently executing in kernel space (PC >= 0xa000).
      * Bits: BRISC(-1)=bit3, T0=bit0, T1=bit1, T2=bit2.
      * tensix_clear() is called when the last core exits kernel space. */
-    uint8_t cores_in_kernel;
+    volatile uint8_t cores_in_kernel;
     /* True if any TRISC (T0/T1/T2, core_id 0-2) has entered kernel space in
      * the current dispatch cycle. Dispatch-only tiles (cq_prefetch/cq_dispatch)
      * run persistent BRISC-only kernels so this never gets set; tensix_clear is
      * suppressed for them to avoid corrupting relay CB semaphore state. */
-    bool had_trisc_in_kernel;
+    volatile bool had_trisc_in_kernel;
 
     /* RISCV debug array read: RISCV_DEBUG_REG_DBG_ARRAY_RD_{EN,CMD,DATA} at 0xFFB12060/64/6C
      * cmd bits: [11:0]=row_addr, [15:12]=row_32b_sel, [18:16]=array_id, [19]=bank_id

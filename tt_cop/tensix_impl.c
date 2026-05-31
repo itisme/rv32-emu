@@ -378,11 +378,14 @@ bool tensix_mmio_read(tensix_t *tt, int core_id, uint32_t addr, uint32_t *result
     }
 
     /* Stream overlay registers: 0xFFB40000 - 0xFFB7FFFF
-     * TODO: Implement if needed. Currently these are read from mem_high directly.
-     * For now, return false to allow normal memory read.
+     * Must use volatile to prevent host compiler from caching across coroutine switches.
      */
     if (addr >= 0xFFB40000 && addr < 0xFFB80000) {
-        /* Fall through to normal memory read */
+        uint32_t offset = addr - 0xFFB00000;
+        if (tt->mem.high_mem && offset < 0x400000) {
+            *result = *(volatile uint32_t *)(tt->mem.high_mem + offset);
+            return true;
+        }
         return false;
     }
 
@@ -563,25 +566,30 @@ bool tensix_mmio_write(tensix_t *tt, int core_id, uint32_t addr, uint32_t data)
     }
 
     /* Stream overlay registers: 0xFFB40000 - 0xFFB7FFFF
-     * Normal memory write still needed, but UPDATE reg has side effect.
+     * Must use volatile to prevent host compiler from caching across coroutine switches.
      */
     if (addr >= 0xFFB40000 && addr < 0xFFB80000) {
         uint32_t off_in_stream = (addr - 0xFFB40000) & 0xFFF;
+        uint32_t offset = addr - 0xFFB00000;
         if (off_in_stream == 0x438) {
             /* UPDATE register (reg 270): extract 17-bit signed increment
              * from bits[22:6] and add to AVAILABLE register (reg 297).
              */
             uint32_t raw = (data >> 6) & 0x1FFFF;
             int32_t increment = (raw & 0x10000) ? (int32_t)(raw | 0xFFFE0000) : (int32_t)raw;
-            uint32_t avail_addr = (addr - 0xFFB00000) + 0x6C; /* +0x6C = 0x4A4 - 0x438 */
-            if (tt->mem.high_mem && avail_addr < 0x400000) {
-                uint32_t old_val = *(uint32_t *)(tt->mem.high_mem + avail_addr);
-                *(uint32_t *)(tt->mem.high_mem + avail_addr) += (uint32_t)increment;
+            uint32_t avail_offset = offset + 0x6C; /* +0x6C = 0x4A4 - 0x438 */
+            if (tt->mem.high_mem && avail_offset < 0x400000) {
+                volatile uint32_t *avail_ptr = (volatile uint32_t *)(tt->mem.high_mem + avail_offset);
+                uint32_t old_val = *avail_ptr;
+                *avail_ptr = old_val + (uint32_t)increment;
                 TT_DBG("tensix_mmio: UPDATE @0x%x, core=%d, data=0x%x, incr=%d, avail %u -> %u\n",
                        addr, core_id, data, increment, old_val, old_val + (uint32_t)increment);
             }
         }
-        return false; /* still do normal memory write */
+        if (tt->mem.high_mem && offset < 0x400000) {
+            *(volatile uint32_t *)(tt->mem.high_mem + offset) = data;
+        }
+        return true;
     }
 
     /* Tensix config registers: 0xFFEF0000 - 0xFFEFFFFF

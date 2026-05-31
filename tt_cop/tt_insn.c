@@ -22,7 +22,8 @@
 static void ts(char *buf, size_t sz) {
     struct timespec tp; clock_gettime(CLOCK_REALTIME, &tp);
     struct tm *tm = localtime(&tp.tv_sec);
-    strftime(buf, sz, "%Y-%m-%d %H:%M:%S", tm);
+    int n = strftime(buf, sz, "%Y-%m-%d %H:%M:%S", tm);
+    snprintf(buf + n, sz - n, ".%03ld", tp.tv_nsec / 1000000);
 }
 
 /* Instruction implementation function pointer type.
@@ -484,8 +485,10 @@ static void print_mop_cfg_if_changed(tensix_t *tt, int tid) {
 
     uint32_t *cfg = tt->cop->threads[tid].mop_cfg;
     if (first[tid] || memcmp(last_cfg[tid], cfg, 9 * sizeof(uint32_t)) != 0) {
-        fprintf(stderr, "[MOP_CFG] tid=%d cfg=[0x%x,0x%x,0x%x,0x%x,0x%x,0x%x,0x%x,0x%x,0x%x]\n",
-                tid, cfg[0], cfg[1], cfg[2], cfg[3], cfg[4],
+        char tsbuf[40];
+        tt_wall_str(tsbuf, sizeof(tsbuf));
+        fprintf(stderr, "[MOP_CFG] %s tid=%d cfg=[0x%x,0x%x,0x%x,0x%x,0x%x,0x%x,0x%x,0x%x,0x%x]\n",
+                tsbuf, tid, cfg[0], cfg[1], cfg[2], cfg[3], cfg[4],
                 cfg[5], cfg[6], cfg[7], cfg[8]);
         memcpy(last_cfg[tid], cfg, 9 * sizeof(uint32_t));
         first[tid] = false;
@@ -1048,6 +1051,10 @@ static bool ttmvmul(tensix_t *tt, uint32_t imm, int tid) {
     if (tt->fidelity[tid] != 0)
         goto mvmul_skip_compute;
 
+    /* LoFi/HiFi2: hardware zeroes BF16 bit0 (= FP32 bit16) of SrcB before multiply.
+     * Detect by mop_cfg[1] (inner loop count = fidelity phases): 1=LoFi, 2=HiFi2. */
+    bool srcb_mask_bit16 = tt->cop && ((tt->cop->threads[tid].mop_cfg[1] & 127) <= 2);
+
     for (unsigned i = 0; i < num_rows; i++) {
         uint32_t sb_idx = srcb_row + (bcast_srcb_row ? 0 : i);
         uint32_t d_idx  = dest_base + i;
@@ -1060,7 +1067,12 @@ static bool ttmvmul(tensix_t *tt, uint32_t imm, int tid) {
             for (unsigned k = 0; k < ROW_SIZE; k++) {
                 uint32_t sa_idx = srca_row + k;
                 if (sa_idx >= SRCA_ROWS) continue;
-                sum += tt->srcb[tt->math_srcb_bank][sb_idx][k] * tt->srca[tt->math_srca_bank][sa_idx][j];
+                float b = tt->srcb[tt->math_srcb_bank][sb_idx][k];
+                if (srcb_mask_bit16) {
+                    union { uint32_t u; float f; } bv;
+                    bv.f = b; bv.u &= ~0x00010000u; b = bv.f;
+                }
+                sum += b * tt->srca[tt->math_srca_bank][sa_idx][j];
             }
             tt->dest[d_idx][j] += sum;
         }
@@ -2132,6 +2144,29 @@ static bool ttunpacr(tensix_t *tt, uint32_t imm, int tid) {
     uint32_t in_data_fmt    = td0 & 0xF;           /* InDataFormat [3:0] */
     /* uint32_t is_uncompressed = (td0 >> 4) & 0x1; */
     uint32_t x_dim          = (td0 >> 16) & 0xFFFF; /* XDim [31:16] */
+
+    /* XDim override from THCON_SEC0_REG5_Tile_x_dim_cntx[which_ctx & 3].
+     * Per ISA (UNPACR_Regular.md lines 69-74):
+     *   if (MultiContextMode && WhichUnpacker == 0)
+     *     XDim = REG5_Tile_x_dim_cntx[WhichContext & 3];
+     *   else
+     *     XDim = ConfigDescriptor.XDim;
+     *
+     * Register layout (BH cfg_defines.h):
+     *   cfg[86] bits[15:0]  = Tile_x_dim_cntx0
+     *   cfg[86] bits[31:16] = Tile_x_dim_cntx1
+     *   cfg[87] bits[15:0]  = Tile_x_dim_cntx2
+     *   cfg[87] bits[31:16] = Tile_x_dim_cntx3
+     *
+     * Without this override, untilize keeps using the tilize phase's x_dim
+     * (from td0) and reads past CB boundaries. */
+    if (multi_ctx_mode && which_unp == 0) {
+        uint32_t ctx = which_ctx & 0x3;
+        uint32_t reg_idx = (ctx < 2) ? (86 + cfg_bank_offset) : (87 + cfg_bank_offset);
+        uint32_t reg_val = tensix_read_cfg(&tt->mem, reg_idx);
+        uint32_t shamt = (ctx & 1) ? 16 : 0;
+        x_dim = (reg_val >> shamt) & 0xFFFF;
+    }
     uint32_t y_dim          = td1 & 0xFF;            /* YDim [39:32] */
     uint32_t z_dim          = (td1 >> 16) & 0xFF;    /* ZDim [55:48] */
     uint32_t w_dim          = td2 & 0xFF;            /* WDim [71:64] */
