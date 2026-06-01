@@ -747,7 +747,7 @@ static bool ttzeroacc(tensix_t *tt, uint32_t imm, int tid) {
     switch (mode) {
     case 0: /* ONE_ROW */
     {
-        uint32_t row = where + tt->dest_rwc[tid];
+        uint32_t row = where + tt->thd_reg[tid][1] + tt->dest_rwc[tid];
         if (row < DEST_ROWS) {
             for (int j = 0; j < ROW_SIZE; j++)
                 tt->dest[row][j] = 0.0f;
@@ -795,15 +795,15 @@ static bool ttzerosrc(tensix_t *tt, uint32_t imm, int tid) {
      * src_mask[1:0]: bit0=ClearSrcA, bit1=ClearSrcB
      */
     uint32_t neg_inf    = (imm >> 4) & 0x1;
-    /* uint32_t write_mode = (imm >> 3) & 0x1; */
-    /* uint32_t bank_mask  = (imm >> 2) & 0x1; */
+    uint32_t write_mode = (imm >> 3) & 0x1;  /* SingleBankMatrixUnit */
+    uint32_t bank_mask  = (imm >> 2) & 0x1;  /* BothBanks */
     uint32_t src_mask   = imm & 0x3;
 
-    uint32_t bank_mask  = (imm >> 2) & 0x1;
     if (src_mask & 0x1) {  /* ClearSrcA */
         float fill = neg_inf ? tt->neginf : 0.0f;
         for (int b = 0; b < 2; b++) {
-            if (!bank_mask || b == tt->unp_srca_bank) {
+            int target = write_mode ? (int)tt->math_srca_bank : (int)tt->unp_srca_bank;
+            if (bank_mask || b == target) {
                 for (int i = 0; i < SRCA_ROWS; i++)
                     for (int j = 0; j < ROW_SIZE; j++)
                         tt->srca[b][i][j] = fill;
@@ -812,7 +812,8 @@ static bool ttzerosrc(tensix_t *tt, uint32_t imm, int tid) {
     }
     if (src_mask & 0x2) {  /* ClearSrcB (always zero, never neg_inf) */
         for (int b = 0; b < 2; b++) {
-            if (!bank_mask || b == tt->unp_srcb_bank) {
+            int target = write_mode ? (int)tt->math_srcb_bank : (int)tt->unp_srcb_bank;
+            if (bank_mask || b == target) {
                 for (int i = 0; i < SRCB_ROWS; i++)
                     for (int j = 0; j < ROW_SIZE; j++)
                         tt->srcb[b][i][j] = 0.0f;
