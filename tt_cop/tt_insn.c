@@ -2015,23 +2015,43 @@ static bool ttpacr(tensix_t *tt, uint32_t imm, int tid) {
     uint32_t zdst_incr = (pack_reg >> 14) & 1;
     uint32_t zdst_clr  = (pack_reg >> 15) & 1;
 
-    /* Y source counter update */
-    adc->ch0_y += ysrc_incr;
-    if (ysrc_clr) adc->ch0_y = 0;
-    if (ysrc_cr)  adc->ch0_y = adc->ch0_y_cr;
+    /* Y source counter update (ISA: Clear > CR > Incr; Clear resets Y_Cr too) */
+    if (ysrc_clr) {
+        adc->ch0_y = 0;
+        adc->ch0_y_cr = 0;
+    } else if (ysrc_cr) {
+        adc->ch0_y_cr += ysrc_incr;
+        adc->ch0_y = adc->ch0_y_cr;
+    } else {
+        adc->ch0_y += ysrc_incr;
+    }
 
-    /* Z source counter update */
-    adc->ch0_z += zsrc_incr;
-    if (zsrc_clr) adc->ch0_z = 0;
+    /* Z source counter update (ISA: Clear resets Z_Cr too) */
+    if (zsrc_clr) {
+        adc->ch0_z = 0;
+        adc->ch0_z_cr = 0;
+    } else {
+        adc->ch0_z += zsrc_incr;
+    }
 
-    /* Y dest counter update */
-    adc->ch1_y += ydst_incr;
-    if (ydst_clr) adc->ch1_y = 0;
-    if (ydst_cr)  adc->ch1_y = adc->ch1_y_cr;
+    /* Y dest counter update (same priority rules as Y source) */
+    if (ydst_clr) {
+        adc->ch1_y = 0;
+        adc->ch1_y_cr = 0;
+    } else if (ydst_cr) {
+        adc->ch1_y_cr += ydst_incr;
+        adc->ch1_y = adc->ch1_y_cr;
+    } else {
+        adc->ch1_y += ydst_incr;
+    }
 
     /* Z dest counter update */
-    adc->ch1_z += zdst_incr;
-    if (zdst_clr) adc->ch1_z = 0;
+    if (zdst_clr) {
+        adc->ch1_z = 0;
+        adc->ch1_z_cr = 0;
+    } else {
+        adc->ch1_z += zdst_incr;
+    }
 
     return true;
 }
@@ -3179,7 +3199,15 @@ static bool sfploadi(tensix_t *tt, uint32_t imm, int tid) {
         case 10: /* LOWER: write lower 16 bits, preserve upper */
             result = (tt->lreg[vd][lane] & 0xFFFF0000) | imm16;
             break;
-        default: /* FLOATA (FP16→FP32) and others: BF16 as fallback */
+        case 1: { /* FLOATA (FP16→FP32): rebias 5-bit exponent to 8-bit */
+            uint32_t sign = (imm16 >> 15) & 0x1;
+            uint32_t exp  = (imm16 >> 10) & 0x1f;
+            uint32_t man  = imm16 & 0x3ff;
+            exp += 112; /* FP16 bias=15 → FP32 bias=127 */
+            result = (sign << 31) | (exp << 23) | (man << 13);
+            break;
+        }
+        default: /* undefined Mod0: UndefinedBehaviour per ISA */
             result = imm16 << 16;
             break;
         }
@@ -4571,7 +4599,7 @@ static bool ttcfgshiftmask(tensix_t *tt, uint32_t imm, int tid) {
     uint32_t scratch_sel = (imm >> 8) & 0x3;
     uint32_t cfg_index   = imm & 0xFF;
 
-    if (cfg_index >= CFG_STATE_REGS * 4) return true;
+    if (cfg_index >= CFG_STATE_REGS) return true; /* CFG_STATE_REGS = CFG_STATE_SIZE*4 = 224 */
 
     uint32_t scratch_idx = (scratch_sel < 3) ? scratch_sel : (uint32_t)tid;
     uint32_t scratch_reg = 209 + scratch_idx;
@@ -4581,7 +4609,7 @@ static bool ttcfgshiftmask(tensix_t *tt, uint32_t imm, int tid) {
     scratch_val = rotr32(scratch_val & mask, rotate_amt);
 
     uint32_t state_id = tt->thd_reg[tid][0] & 0x1;
-    uint32_t cfg_actual = cfg_index + state_id * (CFG_STATE_REGS * 4);
+    uint32_t cfg_actual = cfg_index + state_id * CFG_STATE_REGS;
 
     uint32_t cfg_val = tensix_read_cfg(&tt->mem, cfg_actual);
     if (mask_mode == 0)
