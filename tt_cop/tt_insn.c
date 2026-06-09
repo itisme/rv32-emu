@@ -1360,8 +1360,54 @@ static bool ttmpool3s2(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)im
 static bool ttapool3s2(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
     report_unimpl(__func__, imm, tid); return true;
 }
-static bool ttgmpool(tensix_t *tt, uint32_t imm, int tid) { (void)tt; (void)imm; (void)tid;
-    report_unimpl(__func__, imm, tid); return true;
+static bool ttgmpool(tensix_t *tt, uint32_t imm, int tid) {
+    /* GMPOOL: Dst[dest_base][j] = max(Dst[dest_base][j], max(k=0..15, SrcA[srca_row+k][j]))
+     * ISA: 16x16 SrcA block column-max reduced to 1x16 row, element-wise max with Dst row.
+     * SrcB provides per-row exponent scaling; firmware sets SrcB=1.0 so scale=1.0 (ignored).
+     * ISA zeros the other 3 rows of the 4-row Dst block.
+     * Encoding: same as GAPOOL — clear_dvalid<<22 | ... | addr_mod<<15 | dst<<0
+     * No fidelity phase loop: MAX is idempotent, firmware calls GMPOOL once per group.
+     */
+    if (!tt->srca_dvalid[tt->math_srca_bank]) return false;
+
+    uint32_t clear_dvalid = (imm >> 22) & 0x3;
+    uint32_t addr_mode    = (imm >> 15) & 0xF;
+    uint32_t dst_row      = imm & 0x3FFF;
+
+    bool flip_srca = clear_dvalid & 0x1;
+    bool flip_srcb = (clear_dvalid >> 1) & 0x1;
+
+    uint8_t  ma_bank     = tt->math_srca_bank;
+    uint32_t srca_row    = tt->srca_rwc[tid] & 0x30;   /* 16-row aligned block */
+    uint32_t math_offset = tt->thd_reg[tid][1];
+    uint32_t dest_base   = (dst_row + math_offset + tt->dest_rwc[tid]) & 0x3FF;
+
+    if (dest_base < DEST_ROWS) {
+        for (unsigned j = 0; j < ROW_SIZE; j++) {
+            float cur = tt->dest[dest_base][j];
+            for (unsigned k = 0; k < ROW_SIZE; k++) {
+                float a = (srca_row + k < SRCA_ROWS) ? tt->srca[ma_bank][srca_row + k][j] : 0.0f;
+                if (a > cur) cur = a;
+            }
+            tt->dest[dest_base][j] = cur;
+            for (unsigned i = 1; i < 4; i++) {
+                if (dest_base + i < DEST_ROWS)
+                    tt->dest[dest_base + i][j] = 0.0f;
+            }
+        }
+    }
+
+    if (flip_srca) {
+        tt->srca_dvalid[tt->math_srca_bank] = false;
+        tt->math_srca_bank ^= 1;
+    }
+    if (flip_srcb) {
+        tt->srcb_dvalid[tt->math_srcb_bank] = false;
+        tt->math_srcb_bank ^= 1;
+    }
+
+    apply_addr_mod(tt, addr_mode & 0x7, tid);
+    return true;
 }
 static bool ttgapool(tensix_t *tt, uint32_t imm, int tid) {
     /* GAPOOL: Dst[dest_base][j] += sum(k=0..15, SrcB[srcb_row][k] * SrcA[srca_row+k][j])
